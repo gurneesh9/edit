@@ -961,6 +961,11 @@ impl Tui {
                     tc.scroll_offset_x_max = res.visual_pos_x_max;
                 }
 
+                // Apply basic syntax highlighting by coloring keywords
+                if !tc.single_line {
+                    self.apply_basic_syntax_highlighting(destination);
+                }
+
                 if !tc.single_line {
                     // Render the scrollbar.
                     let track = Rect {
@@ -1282,6 +1287,235 @@ impl Tui {
 
         self.focused_node_for_scrolling = focused_id;
         true
+    }
+
+    /// Applies basic syntax highlighting to the framebuffer by coloring common keywords and patterns.
+    fn apply_basic_syntax_highlighting(&mut self, destination: Rect) {
+        // Define common programming keywords and their colors
+        let keywords = [
+            // Python keywords
+            ("def ", IndexedColor::Blue),
+            ("class ", IndexedColor::Blue),
+            ("if ", IndexedColor::Magenta),
+            ("else", IndexedColor::Magenta),
+            ("elif ", IndexedColor::Magenta),
+            ("for ", IndexedColor::Magenta),
+            ("while ", IndexedColor::Magenta),
+            ("import ", IndexedColor::Cyan),
+            ("from ", IndexedColor::Cyan),
+            ("return ", IndexedColor::Red),
+            ("True", IndexedColor::Yellow),
+            ("False", IndexedColor::Yellow),
+            ("None", IndexedColor::Yellow),
+            
+            // Rust keywords
+            ("fn ", IndexedColor::Blue),
+            ("struct ", IndexedColor::Blue),
+            ("impl ", IndexedColor::Blue),
+            ("let ", IndexedColor::Magenta),
+            ("mut ", IndexedColor::Magenta),
+            ("pub ", IndexedColor::Cyan),
+            ("use ", IndexedColor::Cyan),
+            
+            // JavaScript keywords
+            ("function ", IndexedColor::Blue),
+            ("const ", IndexedColor::Magenta),
+            ("var ", IndexedColor::Magenta),
+            ("let ", IndexedColor::Magenta),
+        ];
+        
+        // Apply keyword highlighting
+        for (keyword, color) in &keywords {
+            self.highlight_keyword_in_rect(destination, keyword, *color);
+        }
+        
+        // Highlight strings (simple pattern matching)
+        self.highlight_strings_in_rect(destination);
+        
+        // Highlight comments
+        self.highlight_comments_in_rect(destination);
+    }
+    
+    /// Highlights a specific keyword in the given rectangle.
+    fn highlight_keyword_in_rect(&mut self, rect: Rect, keyword: &str, color: IndexedColor) {
+        // Collect all the text lines first to avoid borrowing conflicts
+        let mut lines_with_positions = Vec::new();
+        for y in rect.top..rect.bottom {
+            if let Some(line) = self.framebuffer.get_line_text(y) {
+                lines_with_positions.push((y, line.to_string()));
+            }
+        }
+        
+        // Now apply highlighting without borrowing conflicts
+        for (y, line) in lines_with_positions {
+            // Find the margin width by looking for the "│" character
+            let text_start_chars = if let Some(_pos) = line.find('│') {
+                // Find the character position after "│ " (skip the border and space)
+                line.char_indices()
+                    .position(|(_, ch)| ch == '│')
+                    .map(|pos| pos + 2) // Skip '│' and ' '
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            
+            // Convert character position to byte position for slicing
+            let text_start_bytes = line.char_indices()
+                .nth(text_start_chars)
+                .map(|(byte_pos, _)| byte_pos)
+                .unwrap_or(line.len());
+            
+            // Work with the text portion only
+            if text_start_bytes >= line.len() {
+                continue;
+            }
+            let text_portion = &line[text_start_bytes..];
+            let mut start = 0;
+            
+            while let Some(pos) = text_portion[start..].find(keyword) {
+                let actual_pos = start + pos;
+                let end_pos = actual_pos + keyword.len();
+                
+                // Check if this is a whole word (not part of another word)
+                let is_word_boundary = (actual_pos == 0 || !text_portion.chars().nth(actual_pos - 1).unwrap_or(' ').is_alphanumeric()) &&
+                                     (end_pos >= text_portion.len() || !text_portion.chars().nth(end_pos).unwrap_or(' ').is_alphanumeric());
+                
+                if is_word_boundary {
+                    let highlight_rect = Rect {
+                        left: rect.left + (text_start_chars + actual_pos) as CoordType,
+                        top: y,
+                        right: rect.left + (text_start_chars + end_pos) as CoordType,
+                        bottom: y + 1,
+                    };
+                    self.framebuffer.blend_fg(highlight_rect, self.indexed(color));
+                }
+                
+                start = actual_pos + 1;
+            }
+        }
+    }
+    
+    /// Highlights string literals in the given rectangle.
+    fn highlight_strings_in_rect(&mut self, rect: Rect) {
+        // Collect all the text lines first to avoid borrowing conflicts
+        let mut lines_with_positions = Vec::new();
+        for y in rect.top..rect.bottom {
+            if let Some(line) = self.framebuffer.get_line_text(y) {
+                lines_with_positions.push((y, line.to_string()));
+            }
+        }
+        
+        // Now apply highlighting without borrowing conflicts
+        for (y, line) in lines_with_positions {
+            // Find the margin width by looking for the "│" character
+            let text_start_chars = if let Some(_pos) = line.find('│') {
+                // Find the character position after "│ " (skip the border and space)
+                line.char_indices()
+                    .position(|(_, ch)| ch == '│')
+                    .map(|pos| pos + 2) // Skip '│' and ' '
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            
+            // Convert character position to byte position for slicing
+            let text_start_bytes = line.char_indices()
+                .nth(text_start_chars)
+                .map(|(byte_pos, _)| byte_pos)
+                .unwrap_or(line.len());
+            
+            // Work with the text portion only
+            if text_start_bytes >= line.len() {
+                continue;
+            }
+            let text_portion = &line[text_start_bytes..];
+            let mut in_string = false;
+            let mut string_start = 0;
+            let mut quote_char = '"';
+            
+            for (i, ch) in text_portion.char_indices() {
+                if !in_string && (ch == '"' || ch == '\'') {
+                    in_string = true;
+                    string_start = i;
+                    quote_char = ch;
+                } else if in_string && ch == quote_char {
+                    // End of string - highlight from start quote to end quote (inclusive)
+                    // Convert character positions to screen positions
+                    let start_char_pos = text_start_chars + text_portion[..string_start].chars().count();
+                    let end_char_pos = text_start_chars + text_portion[..=i].chars().count();
+                    
+                    let highlight_rect = Rect {
+                        left: rect.left + start_char_pos as CoordType,
+                        top: y,
+                        right: rect.left + end_char_pos as CoordType,
+                        bottom: y + 1,
+                    };
+                    self.framebuffer.blend_fg(highlight_rect, self.indexed(IndexedColor::Green));
+                    in_string = false;
+                }
+            }
+        }
+    }
+    
+    /// Highlights comments in the given rectangle.
+    fn highlight_comments_in_rect(&mut self, rect: Rect) {
+        // Collect all the text lines first to avoid borrowing conflicts
+        let mut lines_with_positions = Vec::new();
+        for y in rect.top..rect.bottom {
+            if let Some(line) = self.framebuffer.get_line_text(y) {
+                lines_with_positions.push((y, line.to_string()));
+            }
+        }
+        
+        // Now apply highlighting without borrowing conflicts
+        for (y, line) in lines_with_positions {
+            // Find the margin width by looking for the "│" character
+            let text_start_chars = if let Some(_) = line.find('│') {
+                // Find the character position after "│ " (skip the border and space)
+                line.char_indices()
+                    .position(|(_, ch)| ch == '│')
+                    .map(|pos| pos + 2) // Skip '│' and ' '
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            
+            // Convert character position to byte position for slicing
+            let text_start_bytes = line.char_indices()
+                .nth(text_start_chars)
+                .map(|(byte_pos, _)| byte_pos)
+                .unwrap_or(line.len());
+            
+            // Work with the text portion only
+            if text_start_bytes >= line.len() {
+                continue;
+            }
+            let text_portion = &line[text_start_bytes..];
+            
+            // Python/Rust style comments
+            if let Some(pos) = text_portion.find('#') {
+                let actual_char_pos = text_start_chars + text_portion[..pos].chars().count();
+                let highlight_rect = Rect {
+                    left: rect.left + actual_char_pos as CoordType,
+                    top: y,
+                    right: rect.right,
+                    bottom: y + 1,
+                };
+                self.framebuffer.blend_fg(highlight_rect, self.indexed_alpha(IndexedColor::BrightBlack, 3, 4));
+            }
+            
+            // JavaScript/Rust style comments
+            if let Some(pos) = text_portion.find("//") {
+                let actual_char_pos = text_start_chars + text_portion[..pos].chars().count();
+                let highlight_rect = Rect {
+                    left: rect.left + actual_char_pos as CoordType,
+                    top: y,
+                    right: rect.right,
+                    bottom: y + 1,
+                };
+                self.framebuffer.blend_fg(highlight_rect, self.indexed_alpha(IndexedColor::BrightBlack, 3, 4));
+            }
+        }
     }
 }
 
