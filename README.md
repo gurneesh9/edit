@@ -6,6 +6,10 @@ This editor pays homage to the classic [MS-DOS Editor](https://en.wikipedia.org/
 
 ![Screenshot of Edit with the About dialog in the foreground](./assets/edit_hero_image.png)
 
+## Microsoft is loser so forked it to add syntax highlighting for my favorite programming language python
+
+![Screenshot of Python syntax highlight](./assets/syntax-highligh-python.png)
+
 ## Installation
 
 * Download the latest release from our [releases page](https://github.com/microsoft/edit/releases/latest)
