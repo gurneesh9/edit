@@ -386,6 +386,12 @@ impl Framebuffer {
         back.cursor.overtype = overtype;
     }
 
+    /// Gets the text content of a specific line in the framebuffer.
+    pub fn get_line_text(&self, y: CoordType) -> Option<&str> {
+        let back = &self.buffers[self.frame_counter & 1];
+        back.text.lines.get(y as usize).map(|s| s.as_str())
+    }
+
     /// Renders the framebuffer contents accumulated since the
     /// last call to `flip()` and returns them serialized as VT.
     pub fn render<'a>(&mut self, arena: &'a Arena) -> ArenaString<'a> {

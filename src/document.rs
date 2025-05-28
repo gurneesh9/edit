@@ -10,6 +10,48 @@ use std::path::PathBuf;
 
 use crate::arena::{ArenaString, scratch_arena};
 use crate::helpers::ReplaceRange as _;
+use crate::syntax::{SyntaxHighlighter, FileType};
+
+/// A document with syntax highlighting capabilities
+pub struct Document {
+    content: String,
+    file_type: FileType,
+    syntax_highlighter: Option<SyntaxHighlighter>,
+}
+
+impl Document {
+    pub fn from_string(content: String, filename: &str) -> Self {
+        Self {
+            content,
+            file_type: SyntaxHighlighter::detect_file_type(filename),
+            syntax_highlighter: Some(SyntaxHighlighter::new()),
+        }
+    }
+
+    pub fn highlight_line<'a>(&'a mut self, line: &'a str, line_number: usize) -> Vec<(syntect::highlighting::Style, &'a str)> {
+        if let Some(highlighter) = &mut self.syntax_highlighter {
+            highlighter.highlight_line(line, self.file_type, line_number)
+        } else {
+            vec![(syntect::highlighting::Style::default(), line)]
+        }
+    }
+
+    pub fn set_theme(&mut self, theme_name: &str) -> bool {
+        if let Some(highlighter) = &mut self.syntax_highlighter {
+            highlighter.set_theme(theme_name)
+        } else {
+            false
+        }
+    }
+
+    pub fn available_themes(&self) -> Vec<String> {
+        if let Some(highlighter) = &self.syntax_highlighter {
+            highlighter.available_themes()
+        } else {
+            vec![]
+        }
+    }
+}
 
 /// An abstraction over reading from text containers.
 pub trait ReadableDocument {
@@ -47,6 +89,33 @@ pub trait WriteableDocument: ReadableDocument {
     /// * The given range may be out of bounds and you MUST clamp it.
     /// * The replacement may not be valid UTF8.
     fn replace(&mut self, range: Range<usize>, replacement: &[u8]);
+}
+
+impl ReadableDocument for Document {
+    fn read_forward(&self, off: usize) -> &[u8] {
+        let s = self.content.as_bytes();
+        &s[off.min(s.len())..]
+    }
+
+    fn read_backward(&self, off: usize) -> &[u8] {
+        let s = self.content.as_bytes();
+        &s[..off.min(s.len())]
+    }
+}
+
+impl WriteableDocument for Document {
+    fn replace(&mut self, range: Range<usize>, replacement: &[u8]) {
+        // `replacement` is not guaranteed to be valid UTF-8, so we need to sanitize it.
+        let scratch = scratch_arena(None);
+        let utf8 = ArenaString::from_utf8_lossy(&scratch, replacement);
+        let src = match &utf8 {
+            Ok(s) => s,
+            Err(s) => s.as_str(),
+        };
+
+        // SAFETY: `range` is guaranteed to be on codepoint boundaries.
+        unsafe { self.content.as_mut_vec() }.replace_range(range, src.as_bytes());
+    }
 }
 
 impl ReadableDocument for &[u8] {

@@ -10,6 +10,7 @@ use edit::buffer::{RcTextBuffer, TextBuffer};
 use edit::helpers::{CoordType, Point};
 use edit::simd::memrchr2;
 use edit::{apperr, path, sys};
+use edit::syntax::{SyntaxHighlighter, FileType};
 
 use crate::state::DisplayablePathBuf;
 
@@ -20,6 +21,8 @@ pub struct Document {
     pub filename: String,
     pub file_id: Option<sys::FileId>,
     pub new_file_counter: usize,
+    pub syntax_highlighter: Option<SyntaxHighlighter>,
+    pub file_type: FileType,
 }
 
 impl Document {
@@ -64,7 +67,22 @@ impl Document {
         let dir = path.parent().map(ToOwned::to_owned).unwrap_or_default();
         self.filename = filename;
         self.dir = Some(DisplayablePathBuf::from_path(dir));
-        self.path = Some(path);
+        self.path = Some(path.clone());
+        
+        // Detect file type and initialize syntax highlighting
+        self.file_type = SyntaxHighlighter::detect_file_type(
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+        );
+        
+        // Only create syntax highlighter for supported file types
+        if self.file_type != FileType::Plain {
+            self.syntax_highlighter = Some(SyntaxHighlighter::new());
+        } else {
+            self.syntax_highlighter = None;
+        }
+        
         self.update_file_mode();
     }
 
@@ -122,6 +140,8 @@ impl DocumentManager {
             filename: Default::default(),
             file_id: None,
             new_file_counter: 0,
+            syntax_highlighter: None,
+            file_type: FileType::Plain,
         };
         self.gen_untitled_name(&mut doc);
 
@@ -182,6 +202,8 @@ impl DocumentManager {
             filename: Default::default(),
             file_id,
             new_file_counter: 0,
+            syntax_highlighter: None,
+            file_type: FileType::Plain,
         };
         doc.set_path(path);
 
