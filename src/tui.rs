@@ -93,6 +93,7 @@
 //! use edit::input::Input;
 //! use edit::tui::*;
 //! use edit::{arena, arena_format};
+//! use crate::syntax::SyntaxHighlighter;
 //!
 //! struct State {
 //!     counter: i32,
@@ -156,7 +157,9 @@ use crate::document::WriteableDocument;
 use crate::framebuffer::{Attributes, Framebuffer, INDEXED_COLORS_COUNT, IndexedColor};
 use crate::hash::*;
 use crate::helpers::*;
+use crate::input::vk::F;
 use crate::input::{InputKeyMod, kbmod, vk};
+use crate::syntax::{SyntaxHighlighter, FileType};
 use crate::{apperr, arena_format, input, unicode};
 
 const ROOT_ID: u64 = 0x14057B7EF767814F; // Knuth's MMIX constant
@@ -314,6 +317,8 @@ pub struct Tui {
     /// The framebuffer used for rendering.
     framebuffer: Framebuffer,
 
+    syntax_highlighter: SyntaxHighlighter,
+
     modifier_translations: ModifierTranslations,
     floater_default_bg: u32,
     floater_default_fg: u32,
@@ -388,6 +393,7 @@ impl Tui {
             prev_tree,
             prev_node_map: Default::default(),
             framebuffer: Framebuffer::new(),
+            syntax_highlighter: SyntaxHighlighter::new(),
 
             modifier_translations: ModifierTranslations {
                 ctrl: "Ctrl",
@@ -667,6 +673,7 @@ impl Tui {
         // TODO: There should be a way to do this without unsafe.
         // Allocating from the arena borrows the arena, and so allocating the tree here borrows self.
         // This conflicts with us passing a mutable reference to `self` into the struct below.
+        // (The arena is reset in `reset()` above.)
         let tree = Tree::new(unsafe { mem::transmute::<&Arena, &Arena>(&self.arena_next) });
 
         Context {
@@ -963,8 +970,11 @@ impl Tui {
 
                 // Apply basic syntax highlighting by coloring keywords
                 if !tc.single_line {
-                    self.apply_basic_syntax_highlighting(destination);
-                }
+                    // Detect file type - you might want to pass this as a parameter
+                    // or store it in the TextareaContent for better accuracy
+                    let file_type = FileType::Python; // Default, or detect based on context
+                    self.apply_syntax_highlighting(destination, file_type);
+                }                
 
                 if !tc.single_line {
                     // Render the scrollbar.
@@ -1290,499 +1300,528 @@ impl Tui {
     }
 
     /// Applies basic syntax highlighting to the framebuffer by coloring common keywords and patterns.
-    fn apply_basic_syntax_highlighting(&mut self, destination: Rect) {
-        // Define common programming keywords and their colors
-        let keywords = [
-            // Python keywords
-            ("def", IndexedColor::Blue),
-            ("class", IndexedColor::Blue),
-            ("if", IndexedColor::Magenta),
-            ("else", IndexedColor::Magenta),
-            ("elif", IndexedColor::Magenta),
-            ("for", IndexedColor::Magenta),
-            ("while", IndexedColor::Magenta),
-            ("import", IndexedColor::Cyan),
-            ("from", IndexedColor::Cyan),
-            ("return", IndexedColor::Red),
-            ("True", IndexedColor::Yellow),
-            ("False", IndexedColor::Yellow),
-            ("None", IndexedColor::Yellow),
-            ("print", IndexedColor::Yellow),
-            ("input", IndexedColor::Yellow),
-            ("len", IndexedColor::Yellow),
-            ("range", IndexedColor::Yellow),
-            ("enumerate", IndexedColor::Yellow),
-            ("zip", IndexedColor::Yellow),
-            ("map", IndexedColor::Yellow),
-            ("self", IndexedColor::Yellow),
-            ("super", IndexedColor::Yellow),
-            ("yield", IndexedColor::Yellow),
-            ("await", IndexedColor::Yellow),
-            ("async", IndexedColor::Yellow),
-            
-            // Rust keywords
-            ("fn ", IndexedColor::Blue),
-            ("struct ", IndexedColor::Blue),
-            ("impl ", IndexedColor::Blue),
-            ("let ", IndexedColor::Magenta),
-            ("mut ", IndexedColor::Magenta),
-            ("pub ", IndexedColor::Cyan),
-            ("use ", IndexedColor::Cyan),
-            
-            // JavaScript keywords
-            ("function ", IndexedColor::Blue),
-            ("const ", IndexedColor::Magenta),
-            ("var ", IndexedColor::Magenta),
-            ("let ", IndexedColor::Magenta),
-        ];
-        
-        // Apply keyword highlighting
-        for (keyword, color) in &keywords {
-            self.highlight_keyword_in_rect(destination, keyword, *color);
+    fn apply_syntax_highlighting(&mut self, destination: Rect, file_type: FileType) {
+        // Collect all the text lines first to avoid borrowing conflicts
+        let mut lines_with_positions = Vec::new();
+        for y in destination.top..destination.bottom {
+            if let Some(line) = self.framebuffer.get_line_text(y) {
+                lines_with_positions.push((y, line.to_string()));
+            }
         }
         
+        // Now apply highlighting without borrowing conflicts
+        for (y, line) in lines_with_positions {
+            // Find the margin width by looking for the "│" character
+            let text_start_chars = if let Some(_pos) = line.find('│') {
+                // Find the character position after "│ " (skip the border and space)
+                line.char_indices()
+                    .position(|(_, ch)| ch == '│')
+                    .map(|pos| pos + 2) // Skip '│' and ' '
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            
+            // Convert character position to byte position for slicing
+            let text_start_bytes = line.char_indices()
+                .nth(text_start_chars)
+                .map(|(byte_pos, _)| byte_pos)
+                .unwrap_or(line.len());
+            
+            // Work with the text portion only
+            if text_start_bytes >= line.len() {
+                continue;
+            }
+            let text_portion = &line[text_start_bytes..];
+            
+            // Use syntect for highlighting
+            let highlighted = self.syntax_highlighter.highlight_line(
+                text_portion, 
+                file_type, 
+                (y - destination.top) as usize
+            );
+            
+            let mut char_offset = text_start_chars;
+            for (style, text_segment) in highlighted {
+                let segment_len = text_segment.chars().count();
+                
+                if segment_len > 0 {
+                    let highlight_rect = Rect {
+                        left: destination.left + char_offset as CoordType,
+                        top: y,
+                        right: destination.left + (char_offset + segment_len) as CoordType,
+                        bottom: y + 1,
+                    };
+                    
+                    // Convert syntect::highlighting::Style to framebuffer colors
+                    let fg_color = Self::convert_syntect_color_to_u32(style.foreground);
+                    self.framebuffer.blend_fg(highlight_rect, fg_color);
+                    
+                    // Apply text attributes if needed
+                    if style.font_style.contains(syntect::highlighting::FontStyle::UNDERLINE) {
+                        self.framebuffer.replace_attr(highlight_rect, Attributes::Underlined, Attributes::Underlined);
+                    }
+                    if style.font_style.contains(syntect::highlighting::FontStyle::ITALIC) {
+                        self.framebuffer.replace_attr(highlight_rect, Attributes::Italic, Attributes::Italic);
+                    }
+                    if style.font_style.contains(syntect::highlighting::FontStyle::UNDERLINE) {
+                        self.framebuffer.replace_attr(highlight_rect, Attributes::Underlined, Attributes::Underlined);
+                    }
+                }
+                
+                char_offset += segment_len;
+            }
+        }
+    }
+    
+    // Helper method to convert syntect colors to u32
+    fn convert_syntect_color_to_u32(color: syntect::highlighting::Color) -> u32 {
+        // Convert RGBA to u32 (assuming RGBA format)
+        ((color.a as u32) << 24) | ((color.r as u32) << 16) | ((color.g as u32) << 8) | (color.b as u32)
+    }
+
+        
         // Highlight strings (simple pattern matching)
-        self.highlight_strings_in_rect(destination);
+        // self.highlight_strings_in_rect(destination);
         
-        // Highlight comments
-        self.highlight_comments_in_rect(destination);
+        // // Highlight comments
+        // self.highlight_comments_in_rect(destination);
         
-        // Highlight variables
-        self.highlight_variables_in_rect(destination);
+        // // Highlight variables
+        // self.highlight_variables_in_rect(destination);
     }
     
     /// Highlights a specific keyword in the given rectangle.
-    fn highlight_keyword_in_rect(&mut self, rect: Rect, keyword: &str, color: IndexedColor) {
-        // Collect all the text lines first to avoid borrowing conflicts
-        let mut lines_with_positions = Vec::new();
-        for y in rect.top..rect.bottom {
-            if let Some(line) = self.framebuffer.get_line_text(y) {
-                lines_with_positions.push((y, line.to_string()));
-            }
-        }
+    // fn highlight_keyword_in_rect(&mut self, rect: Rect, keyword: &str, color: IndexedColor) {
+    //     // Collect all the text lines first to avoid borrowing conflicts
+    //     let mut lines_with_positions = Vec::new();
+    //     for y in rect.top..rect.bottom {
+    //         if let Some(line) = self.framebuffer.get_line_text(y) {
+    //             lines_with_positions.push((y, line.to_string()));
+    //         }
+    //     }
         
-        // Now apply highlighting without borrowing conflicts
-        for (y, line) in lines_with_positions {
-            // Find the margin width by looking for the "│" character
-            let text_start_chars = if let Some(_pos) = line.find('│') {
-                // Find the character position after "│ " (skip the border and space)
-                line.char_indices()
-                    .position(|(_, ch)| ch == '│')
-                    .map(|pos| pos + 2) // Skip '│' and ' '
-                    .unwrap_or(0)
-            } else {
-                0
-            };
+    //     // Now apply highlighting without borrowing conflicts
+    //     for (y, line) in lines_with_positions {
+    //         // Find the margin width by looking for the "│" character
+    //         let text_start_chars = if let Some(_pos) = line.find('│') {
+    //             // Find the character position after "│ " (skip the border and space)
+    //             line.char_indices()
+    //                 .position(|(_, ch)| ch == '│')
+    //                 .map(|pos| pos + 2) // Skip '│' and ' '
+    //                 .unwrap_or(0)
+    //         } else {
+    //             0
+    //         };
             
-            // Convert character position to byte position for slicing
-            let text_start_bytes = line.char_indices()
-                .nth(text_start_chars)
-                .map(|(byte_pos, _)| byte_pos)
-                .unwrap_or(line.len());
+    //         // Convert character position to byte position for slicing
+    //         let text_start_bytes = line.char_indices()
+    //             .nth(text_start_chars)
+    //             .map(|(byte_pos, _)| byte_pos)
+    //             .unwrap_or(line.len());
             
-            // Work with the text portion only
-            if text_start_bytes >= line.len() {
-                continue;
-            }
-            let text_portion = &line[text_start_bytes..];
-            let mut start = 0;
+    //         // Work with the text portion only
+    //         if text_start_bytes >= line.len() {
+    //             continue;
+    //         }
+    //         let text_portion = &line[text_start_bytes..];
+    //         let mut start = 0;
             
-            while let Some(pos) = text_portion[start..].find(keyword) {
-                let actual_pos = start + pos;
-                let end_pos = actual_pos + keyword.len();
+    //         while let Some(pos) = text_portion[start..].find(keyword) {
+    //             let actual_pos = start + pos;
+    //             let end_pos = actual_pos + keyword.len();
                 
-                // Check if this is a whole word (not part of another word)
-                let is_word_boundary = (actual_pos == 0 || !text_portion.chars().nth(actual_pos - 1).unwrap_or(' ').is_alphanumeric()) &&
-                                     (end_pos >= text_portion.len() || !text_portion.chars().nth(end_pos).unwrap_or(' ').is_alphanumeric());
+    //             // Check if this is a whole word (not part of another word)
+    //             let is_word_boundary = (actual_pos == 0 || !text_portion.chars().nth(actual_pos - 1).unwrap_or(' ').is_alphanumeric()) &&
+    //                                  (end_pos >= text_portion.len() || !text_portion.chars().nth(end_pos).unwrap_or(' ').is_alphanumeric());
                 
-                if is_word_boundary {
-                    let highlight_rect = Rect {
-                        left: rect.left + (text_start_chars + actual_pos) as CoordType,
-                        top: y,
-                        right: rect.left + (text_start_chars + end_pos) as CoordType,
-                        bottom: y + 1,
-                    };
-                    self.framebuffer.blend_fg(highlight_rect, self.indexed(color));
-                }
+    //             if is_word_boundary {
+    //                 let highlight_rect = Rect {
+    //                     left: rect.left + (text_start_chars + actual_pos) as CoordType,
+    //                     top: y,
+    //                     right: rect.left + (text_start_chars + end_pos) as CoordType,
+    //                     bottom: y + 1,
+    //                 };
+    //                 self.framebuffer.blend_fg(highlight_rect, self.indexed(color));
+    //             }
                 
-                start = actual_pos + 1;
-            }
-        }
-    }
+    //             start = actual_pos + 1;
+    //         }
+    //     }
+    // }
     
-    /// Highlights string literals in the given rectangle.
-    fn highlight_strings_in_rect(&mut self, rect: Rect) {
-        // Collect all the text lines first to avoid borrowing conflicts
-        let mut lines_with_positions = Vec::new();
-        for y in rect.top..rect.bottom {
-            if let Some(line) = self.framebuffer.get_line_text(y) {
-                lines_with_positions.push((y, line.to_string()));
-            }
-        }
+    // /// Highlights string literals in the given rectangle.
+    // fn highlight_strings_in_rect(&mut self, rect: Rect) {
+    //     // Collect all the text lines first to avoid borrowing conflicts
+    //     let mut lines_with_positions = Vec::new();
+    //     for y in rect.top..rect.bottom {
+    //         if let Some(line) = self.framebuffer.get_line_text(y) {
+    //             lines_with_positions.push((y, line.to_string()));
+    //         }
+    //     }
         
-        // Now apply highlighting without borrowing conflicts
-        for (y, line) in lines_with_positions {
-            // Find the margin width by looking for the "│" character
-            let text_start_chars = if let Some(_pos) = line.find('│') {
-                // Find the character position after "│ " (skip the border and space)
-                line.char_indices()
-                    .position(|(_, ch)| ch == '│')
-                    .map(|pos| pos + 2) // Skip '│' and ' '
-                    .unwrap_or(0)
-            } else {
-                0
-            };
+    //     // Now apply highlighting without borrowing conflicts
+    //     for (y, line) in lines_with_positions {
+    //         // Find the margin width by looking for the "│" character
+    //         let text_start_chars = if let Some(_pos) = line.find('│') {
+    //             // Find the character position after "│ " (skip the border and space)
+    //             line.char_indices()
+    //                 .position(|(_, ch)| ch == '│')
+    //                 .map(|pos| pos + 2) // Skip '│' and ' '
+    //                 .unwrap_or(0)
+    //         } else {
+    //             0
+    //         };
             
-            // Convert character position to byte position for slicing
-            let text_start_bytes = line.char_indices()
-                .nth(text_start_chars)
-                .map(|(byte_pos, _)| byte_pos)
-                .unwrap_or(line.len());
+    //         // Convert character position to byte position for slicing
+    //         let text_start_bytes = line.char_indices()
+    //             .nth(text_start_chars)
+    //             .map(|(byte_pos, _)| byte_pos)
+    //             .unwrap_or(line.len());
             
-            // Work with the text portion only
-            if text_start_bytes >= line.len() {
-                continue;
-            }
-            let text_portion = &line[text_start_bytes..];
-            let mut in_string = false;
-            let mut string_start = 0;
-            let mut quote_char = '"';
+    //         // Work with the text portion only
+    //         if text_start_bytes >= line.len() {
+    //             continue;
+    //         }
+    //         let text_portion = &line[text_start_bytes..];
+    //         let mut in_string = false;
+    //         let mut string_start = 0;
+    //         let mut quote_char = '"';
             
-            for (i, ch) in text_portion.char_indices() {
-                if !in_string && (ch == '"' || ch == '\'') {
-                    in_string = true;
-                    string_start = i;
-                    quote_char = ch;
-                } else if in_string && ch == quote_char {
-                    // End of string - highlight from start quote to end quote (inclusive)
-                    // Convert character positions to screen positions
-                    let start_char_pos = text_start_chars + text_portion[..string_start].chars().count();
-                    let end_char_pos = text_start_chars + text_portion[..=i].chars().count();
+    //         for (i, ch) in text_portion.char_indices() {
+    //             if !in_string && (ch == '"' || ch == '\'') {
+    //                 in_string = true;
+    //                 string_start = i;
+    //                 quote_char = ch;
+    //             } else if in_string && ch == quote_char {
+    //                 // End of string - highlight from start quote to end quote (inclusive)
+    //                 // Convert character positions to screen positions
+    //                 let start_char_pos = text_start_chars + text_portion[..string_start].chars().count();
+    //                 let end_char_pos = text_start_chars + text_portion[..=i].chars().count();
                     
-                    let highlight_rect = Rect {
-                        left: rect.left + start_char_pos as CoordType,
-                        top: y,
-                        right: rect.left + end_char_pos as CoordType,
-                        bottom: y + 1,
-                    };
-                    self.framebuffer.blend_fg(highlight_rect, self.indexed(IndexedColor::Green));
-                    in_string = false;
-                }
-            }
-        }
-    }
+    //                 let highlight_rect = Rect {
+    //                     left: rect.left + start_char_pos as CoordType,
+    //                     top: y,
+    //                     right: rect.left + end_char_pos as CoordType,
+    //                     bottom: y + 1,
+    //                 };
+    //                 self.framebuffer.blend_fg(highlight_rect, self.indexed(IndexedColor::Green));
+    //                 in_string = false;
+    //             }
+    //         }
+    //     }
+    // }
     
-    /// Highlights comments in the given rectangle.
-    fn highlight_comments_in_rect(&mut self, rect: Rect) {
-        // Collect all the text lines first to avoid borrowing conflicts
-        let mut lines_with_positions = Vec::new();
-        for y in rect.top..rect.bottom {
-            if let Some(line) = self.framebuffer.get_line_text(y) {
-                lines_with_positions.push((y, line.to_string()));
-            }
-        }
+    // /// Highlights comments in the given rectangle.
+    // fn highlight_comments_in_rect(&mut self, rect: Rect) {
+    //     // Collect all the text lines first to avoid borrowing conflicts
+    //     let mut lines_with_positions = Vec::new();
+    //     for y in rect.top..rect.bottom {
+    //         if let Some(line) = self.framebuffer.get_line_text(y) {
+    //             lines_with_positions.push((y, line.to_string()));
+    //         }
+    //     }
         
-        // Now apply highlighting without borrowing conflicts
-        for (y, line) in lines_with_positions {
-            // Find the margin width by looking for the "│" character
-            let text_start_chars = if let Some(_) = line.find('│') {
-                // Find the character position after "│ " (skip the border and space)
-                line.char_indices()
-                    .position(|(_, ch)| ch == '│')
-                    .map(|pos| pos + 2) // Skip '│' and ' '
-                    .unwrap_or(0)
-            } else {
-                0
-            };
+    //     // Now apply highlighting without borrowing conflicts
+    //     for (y, line) in lines_with_positions {
+    //         // Find the margin width by looking for the "│" character
+    //         let text_start_chars = if let Some(_) = line.find('│') {
+    //             // Find the character position after "│ " (skip the border and space)
+    //             line.char_indices()
+    //                 .position(|(_, ch)| ch == '│')
+    //                 .map(|pos| pos + 2) // Skip '│' and ' '
+    //                 .unwrap_or(0)
+    //         } else {
+    //             0
+    //         };
             
-            // Convert character position to byte position for slicing
-            let text_start_bytes = line.char_indices()
-                .nth(text_start_chars)
-                .map(|(byte_pos, _)| byte_pos)
-                .unwrap_or(line.len());
+    //         // Convert character position to byte position for slicing
+    //         let text_start_bytes = line.char_indices()
+    //             .nth(text_start_chars)
+    //             .map(|(byte_pos, _)| byte_pos)
+    //             .unwrap_or(line.len());
             
-            // Work with the text portion only
-            if text_start_bytes >= line.len() {
-                continue;
-            }
-            let text_portion = &line[text_start_bytes..];
+    //         // Work with the text portion only
+    //         if text_start_bytes >= line.len() {
+    //             continue;
+    //         }
+    //         let text_portion = &line[text_start_bytes..];
             
-            // Python/Rust style comments
-            if let Some(pos) = text_portion.find('#') {
-                let actual_char_pos = text_start_chars + text_portion[..pos].chars().count();
-                let highlight_rect = Rect {
-                    left: rect.left + actual_char_pos as CoordType,
-                    top: y,
-                    right: rect.right,
-                    bottom: y + 1,
-                };
-                self.framebuffer.blend_fg(highlight_rect, self.indexed_alpha(IndexedColor::BrightBlack, 3, 4));
-            }
+    //         // Python/Rust style comments
+    //         if let Some(pos) = text_portion.find('#') {
+    //             let actual_char_pos = text_start_chars + text_portion[..pos].chars().count();
+    //             let highlight_rect = Rect {
+    //                 left: rect.left + actual_char_pos as CoordType,
+    //                 top: y,
+    //                 right: rect.right,
+    //                 bottom: y + 1,
+    //             };
+    //             self.framebuffer.blend_fg(highlight_rect, self.indexed_alpha(IndexedColor::BrightBlack, 3, 4));
+    //         }
             
-            // JavaScript/Rust style comments
-            if let Some(pos) = text_portion.find("//") {
-                let actual_char_pos = text_start_chars + text_portion[..pos].chars().count();
-                let highlight_rect = Rect {
-                    left: rect.left + actual_char_pos as CoordType,
-                    top: y,
-                    right: rect.right,
-                    bottom: y + 1,
-                };
-                self.framebuffer.blend_fg(highlight_rect, self.indexed_alpha(IndexedColor::BrightBlack, 3, 4));
-            }
-        }
-    }
+    //         // JavaScript/Rust style comments
+    //         if let Some(pos) = text_portion.find("//") {
+    //             let actual_char_pos = text_start_chars + text_portion[..pos].chars().count();
+    //             let highlight_rect = Rect {
+    //                 left: rect.left + actual_char_pos as CoordType,
+    //                 top: y,
+    //                 right: rect.right,
+    //                 bottom: y + 1,
+    //             };
+    //             self.framebuffer.blend_fg(highlight_rect, self.indexed_alpha(IndexedColor::BrightBlack, 3, 4));
+    //         }
+    //     }
+    // }
     
-    /// Highlights variables in the given rectangle.
-    /// Detects variables based on common patterns in different programming languages.
-    fn highlight_variables_in_rect(&mut self, rect: Rect) {
-        // Collect all the text lines first to avoid borrowing conflicts
-        let mut lines_with_positions = Vec::new();
-        for y in rect.top..rect.bottom {
-            if let Some(line) = self.framebuffer.get_line_text(y) {
-                lines_with_positions.push((y, line.to_string()));
-            }
-        }
+    // /// Highlights variables in the given rectangle.
+    // /// Detects variables based on common patterns in different programming languages.
+    // fn highlight_variables_in_rect(&mut self, rect: Rect) {
+    //     // Collect all the text lines first to avoid borrowing conflicts
+    //     let mut lines_with_positions = Vec::new();
+    //     for y in rect.top..rect.bottom {
+    //         if let Some(line) = self.framebuffer.get_line_text(y) {
+    //             lines_with_positions.push((y, line.to_string()));
+    //         }
+    //     }
         
-        // Now apply highlighting without borrowing conflicts
-        for (y, line) in lines_with_positions {
-            // Find the margin width by looking for the "│" character
-            let text_start_chars = if let Some(_) = line.find('│') {
-                // Find the character position after "│ " (skip the border and space)
-                line.char_indices()
-                    .position(|(_, ch)| ch == '│')
-                    .map(|pos| pos + 2) // Skip '│' and ' '
-                    .unwrap_or(0)
-            } else {
-                0
-            };
+    //     // Now apply highlighting without borrowing conflicts
+    //     for (y, line) in lines_with_positions {
+    //         // Find the margin width by looking for the "│" character
+    //         let text_start_chars = if let Some(_) = line.find('│') {
+    //             // Find the character position after "│ " (skip the border and space)
+    //             line.char_indices()
+    //                 .position(|(_, ch)| ch == '│')
+    //                 .map(|pos| pos + 2) // Skip '│' and ' '
+    //                 .unwrap_or(0)
+    //         } else {
+    //             0
+    //         };
             
-            // Convert character position to byte position for slicing
-            let text_start_bytes = line.char_indices()
-                .nth(text_start_chars)
-                .map(|(byte_pos, _)| byte_pos)
-                .unwrap_or(line.len());
+    //         // Convert character position to byte position for slicing
+    //         let text_start_bytes = line.char_indices()
+    //             .nth(text_start_chars)
+    //             .map(|(byte_pos, _)| byte_pos)
+    //             .unwrap_or(line.len());
             
-            // Work with the text portion only
-            if text_start_bytes >= line.len() {
-                continue;
-            }
-            let text_portion = &line[text_start_bytes..];
+    //         // Work with the text portion only
+    //         if text_start_bytes >= line.len() {
+    //             continue;
+    //         }
+    //         let text_portion = &line[text_start_bytes..];
             
-            // Keywords to exclude from variable highlighting
-            let keywords = [
-                "def", "class", "if", "else", "elif", "for", "while", "import", "from", "return",
-                "True", "False", "None", "print", "input", "len", "range", "enumerate", "zip",
-                "map", "self", "super", "yield", "await", "async", "fn", "struct", "impl", 
-                "let", "mut", "pub", "use", "function", "const", "var", "int", "float", "str",
-                "bool", "list", "dict", "tuple", "set", "and", "or", "not", "in", "is", "try",
-                "except", "finally", "with", "as", "pass", "break", "continue", "global",
-                "nonlocal", "lambda", "match", "case"
-            ];
+    //         // Keywords to exclude from variable highlighting
+    //         let keywords = [
+    //             "def", "class", "if", "else", "elif", "for", "while", "import", "from", "return",
+    //             "True", "False", "None", "print", "input", "len", "range", "enumerate", "zip",
+    //             "map", "self", "super", "yield", "await", "async", "fn", "struct", "impl", 
+    //             "let", "mut", "pub", "use", "function", "const", "var", "int", "float", "str",
+    //             "bool", "list", "dict", "tuple", "set", "and", "or", "not", "in", "is", "try",
+    //             "except", "finally", "with", "as", "pass", "break", "continue", "global",
+    //             "nonlocal", "lambda", "match", "case"
+    //         ];
             
-            // Detect variable assignment patterns
-            self.highlight_variable_assignments(rect, y, text_start_chars, text_portion, &keywords);
+    //         // Detect variable assignment patterns
+    //         self.highlight_variable_assignments(rect, y, text_start_chars, text_portion, &keywords);
             
-            // Detect function parameter patterns
-            self.highlight_function_parameters(rect, y, text_start_chars, text_portion, &keywords);
+    //         // Detect function parameter patterns
+    //         self.highlight_function_parameters(rect, y, text_start_chars, text_portion, &keywords);
             
-            // Detect variable usage patterns (identifiers that aren't keywords)
-            self.highlight_variable_usage(rect, y, text_start_chars, text_portion, &keywords);
-        }
-    }
+    //         // Detect variable usage patterns (identifiers that aren't keywords)
+    //         self.highlight_variable_usage(rect, y, text_start_chars, text_portion, &keywords);
+    //     }
+    // }
     
-    /// Highlights variable assignments (e.g., "variable = value")
-    fn highlight_variable_assignments(&mut self, rect: Rect, y: CoordType, text_start_chars: usize, text_portion: &str, keywords: &[&str]) {
-        // Look for assignment patterns: identifier = something
-        let mut chars = text_portion.char_indices().peekable();
-        let mut word_start = None;
-        let mut in_string = false;
-        let mut string_char = '"';
+    // /// Highlights variable assignments (e.g., "variable = value")
+    // fn highlight_variable_assignments(&mut self, rect: Rect, y: CoordType, text_start_chars: usize, text_portion: &str, keywords: &[&str]) {
+    //     // Look for assignment patterns: identifier = something
+    //     let mut chars = text_portion.char_indices().peekable();
+    //     let mut word_start = None;
+    //     let mut in_string = false;
+    //     let mut string_char = '"';
         
-        while let Some((i, ch)) = chars.next() {
-            // Track string state to avoid highlighting inside strings
-            if !in_string && (ch == '"' || ch == '\'') {
-                in_string = true;
-                string_char = ch;
-                continue;
-            } else if in_string && ch == string_char {
-                in_string = false;
-                continue;
-            } else if in_string {
-                continue;
-            }
+    //     while let Some((i, ch)) = chars.next() {
+    //         // Track string state to avoid highlighting inside strings
+    //         if !in_string && (ch == '"' || ch == '\'') {
+    //             in_string = true;
+    //             string_char = ch;
+    //             continue;
+    //         } else if in_string && ch == string_char {
+    //             in_string = false;
+    //             continue;
+    //         } else if in_string {
+    //             continue;
+    //         }
             
-            if ch.is_alphabetic() || ch == '_' {
-                if word_start.is_none() {
-                    word_start = Some(i);
-                }
-            } else if ch.is_ascii_digit() && word_start.is_some() {
-                // Continue word
-            } else {
-                if let Some(start) = word_start {
-                    let word = &text_portion[start..i];
+    //         if ch.is_alphabetic() || ch == '_' {
+    //             if word_start.is_none() {
+    //                 word_start = Some(i);
+    //             }
+    //         } else if ch.is_ascii_digit() && word_start.is_some() {
+    //             // Continue word
+    //         } else {
+    //             if let Some(start) = word_start {
+    //                 let word = &text_portion[start..i];
                     
-                    // Check if this looks like an assignment
-                    if let Some((next_i, next_ch)) = chars.peek() {
-                        if *next_ch == '=' && !keywords.contains(&word) {
-                            // Skip ahead to see if it's not == or !=
-                            let mut temp_chars = chars.clone();
-                            temp_chars.next(); // Skip the '='
-                            if let Some((_, after_eq)) = temp_chars.peek() {
-                                if *after_eq != '=' {
-                                    // This is an assignment, highlight the variable
-                                    let start_char_pos = text_start_chars + text_portion[..start].chars().count();
-                                    let end_char_pos = text_start_chars + text_portion[..i].chars().count();
+    //                 // Check if this looks like an assignment
+    //                 if let Some((next_i, next_ch)) = chars.peek() {
+    //                     if *next_ch == '=' && !keywords.contains(&word) {
+    //                         // Skip ahead to see if it's not == or !=
+    //                         let mut temp_chars = chars.clone();
+    //                         temp_chars.next(); // Skip the '='
+    //                         if let Some((_, after_eq)) = temp_chars.peek() {
+    //                             if *after_eq != '=' {
+    //                                 // This is an assignment, highlight the variable
+    //                                 let start_char_pos = text_start_chars + text_portion[..start].chars().count();
+    //                                 let end_char_pos = text_start_chars + text_portion[..i].chars().count();
                                     
-                                    let highlight_rect = Rect {
-                                        left: rect.left + start_char_pos as CoordType,
-                                        top: y,
-                                        right: rect.left + end_char_pos as CoordType,
-                                        bottom: y + 1,
-                                    };
-                                    self.framebuffer.blend_fg(highlight_rect, self.indexed(IndexedColor::Cyan));
-                                }
-                            }
-                        }
-                    }
-                }
-                word_start = None;
-            }
-        }
-    }
+    //                                 let highlight_rect = Rect {
+    //                                     left: rect.left + start_char_pos as CoordType,
+    //                                     top: y,
+    //                                     right: rect.left + end_char_pos as CoordType,
+    //                                     bottom: y + 1,
+    //                                 };
+    //                                 self.framebuffer.blend_fg(highlight_rect, self.indexed(IndexedColor::Cyan));
+    //                             }
+    //                         }
+    //                     }
+    //                 }
+    //             }
+    //             word_start = None;
+    //         }
+    //     }
+    // }
     
-    /// Highlights function parameters (e.g., in "def func(param1, param2):")
-    fn highlight_function_parameters(&mut self, rect: Rect, y: CoordType, text_start_chars: usize, text_portion: &str, keywords: &[&str]) {
-        // Look for function definition patterns
-        if text_portion.contains("def ") || text_portion.contains("fn ") || text_portion.contains("function ") {
-            if let Some(open_paren) = text_portion.find('(') {
-                if let Some(close_paren) = text_portion.find(')') {
-                    if close_paren > open_paren {
-                        let params_section = &text_portion[open_paren + 1..close_paren];
+    // /// Highlights function parameters (e.g., in "def func(param1, param2):")
+    // fn highlight_function_parameters(&mut self, rect: Rect, y: CoordType, text_start_chars: usize, text_portion: &str, keywords: &[&str]) {
+    //     // Look for function definition patterns
+    //     if text_portion.contains("def ") || text_portion.contains("fn ") || text_portion.contains("function ") {
+    //         if let Some(open_paren) = text_portion.find('(') {
+    //             if let Some(close_paren) = text_portion.find(')') {
+    //                 if close_paren > open_paren {
+    //                     let params_section = &text_portion[open_paren + 1..close_paren];
                         
-                        // Split parameters by comma and highlight each
-                        for param in params_section.split(',') {
-                            let param = param.trim();
-                            if let Some(equals_pos) = param.find('=') {
-                                // Default parameter, highlight only the name part
-                                let param_name = param[..equals_pos].trim();
-                                if self.is_valid_identifier(param_name) && !keywords.contains(&param_name) {
-                                    self.highlight_word_in_section(rect, y, text_start_chars, text_portion, param_name, IndexedColor::Yellow);
-                                }
-                            } else if param.contains(':') {
-                                // Type annotation (Python/Rust style), highlight the name part
-                                let param_name = param.split(':').next().unwrap().trim();
-                                if self.is_valid_identifier(param_name) && !keywords.contains(&param_name) {
-                                    self.highlight_word_in_section(rect, y, text_start_chars, text_portion, param_name, IndexedColor::Yellow);
-                                }
-                            } else if self.is_valid_identifier(param) && !keywords.contains(&param) {
-                                self.highlight_word_in_section(rect, y, text_start_chars, text_portion, param, IndexedColor::Yellow);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+    //                     // Split parameters by comma and highlight each
+    //                     for param in params_section.split(',') {
+    //                         let param = param.trim();
+    //                         if let Some(equals_pos) = param.find('=') {
+    //                             // Default parameter, highlight only the name part
+    //                             let param_name = param[..equals_pos].trim();
+    //                             if self.is_valid_identifier(param_name) && !keywords.contains(&param_name) {
+    //                                 self.highlight_word_in_section(rect, y, text_start_chars, text_portion, param_name, IndexedColor::Yellow);
+    //                             }
+    //                         } else if param.contains(':') {
+    //                             // Type annotation (Python/Rust style), highlight the name part
+    //                             let param_name = param.split(':').next().unwrap().trim();
+    //                             if self.is_valid_identifier(param_name) && !keywords.contains(&param_name) {
+    //                                 self.highlight_word_in_section(rect, y, text_start_chars, text_portion, param_name, IndexedColor::Yellow);
+    //                             }
+    //                         } else if self.is_valid_identifier(param) && !keywords.contains(&param) {
+    //                             self.highlight_word_in_section(rect, y, text_start_chars, text_portion, param, IndexedColor::Yellow);
+    //                         }
+    //                     }
+    //                 }
+    //             }
+    //         }
+    //     }
+    // }
     
-    /// Highlights variable usage (identifiers that aren't keywords)
-    fn highlight_variable_usage(&mut self, rect: Rect, y: CoordType, text_start_chars: usize, text_portion: &str, keywords: &[&str]) {
-        let mut chars = text_portion.char_indices();
-        let mut word_start = None;
-        let mut in_string = false;
-        let mut string_char = '"';
-        let mut after_dot = false;
+    // /// Highlights variable usage (identifiers that aren't keywords)
+    // fn highlight_variable_usage(&mut self, rect: Rect, y: CoordType, text_start_chars: usize, text_portion: &str, keywords: &[&str]) {
+    //     let mut chars = text_portion.char_indices();
+    //     let mut word_start = None;
+    //     let mut in_string = false;
+    //     let mut string_char = '"';
+    //     let mut after_dot = false;
         
-        while let Some((i, ch)) = chars.next() {
-            // Track string state to avoid highlighting inside strings
-            if !in_string && (ch == '"' || ch == '\'') {
-                in_string = true;
-                string_char = ch;
-                continue;
-            } else if in_string && ch == string_char {
-                in_string = false;
-                continue;
-            } else if in_string {
-                continue;
-            }
+    //     while let Some((i, ch)) = chars.next() {
+    //         // Track string state to avoid highlighting inside strings
+    //         if !in_string && (ch == '"' || ch == '\'') {
+    //             in_string = true;
+    //             string_char = ch;
+    //             continue;
+    //         } else if in_string && ch == string_char {
+    //             in_string = false;
+    //             continue;
+    //         } else if in_string {
+    //             continue;
+    //         }
             
-            // Track if we're after a dot (for method calls)
-            if ch == '.' {
-                after_dot = true;
-                word_start = None;
-                continue;
-            }
+    //         // Track if we're after a dot (for method calls)
+    //         if ch == '.' {
+    //             after_dot = true;
+    //             word_start = None;
+    //             continue;
+    //         }
             
-            if ch.is_alphabetic() || ch == '_' {
-                if word_start.is_none() {
-                    word_start = Some(i);
-                }
-            } else if ch.is_ascii_digit() && word_start.is_some() {
-                // Continue word
-            } else {
-                if let Some(start) = word_start {
-                    let word = &text_portion[start..i];
+    //         if ch.is_alphabetic() || ch == '_' {
+    //             if word_start.is_none() {
+    //                 word_start = Some(i);
+    //             }
+    //         } else if ch.is_ascii_digit() && word_start.is_some() {
+    //             // Continue word
+    //         } else {
+    //             if let Some(start) = word_start {
+    //                 let word = &text_portion[start..i];
                     
-                    // Highlight if it's not a keyword and looks like a variable
-                    if !keywords.contains(&word) && self.is_valid_identifier(word) {
-                        let color = if after_dot {
-                            IndexedColor::Green // Methods/attributes
-                        } else {
-                            IndexedColor::White // Regular variables
-                        };
+    //                 // Highlight if it's not a keyword and looks like a variable
+    //                 if !keywords.contains(&word) && self.is_valid_identifier(word) {
+    //                     let color = if after_dot {
+    //                         IndexedColor::Green // Methods/attributes
+    //                     } else {
+    //                         IndexedColor::White // Regular variables
+    //                     };
                         
-                        let start_char_pos = text_start_chars + text_portion[..start].chars().count();
-                        let end_char_pos = text_start_chars + text_portion[..i].chars().count();
+    //                     let start_char_pos = text_start_chars + text_portion[..start].chars().count();
+    //                     let end_char_pos = text_start_chars + text_portion[..i].chars().count();
                         
-                        let highlight_rect = Rect {
-                            left: rect.left + start_char_pos as CoordType,
-                            top: y,
-                            right: rect.left + end_char_pos as CoordType,
-                            bottom: y + 1,
-                        };
-                        self.framebuffer.blend_fg(highlight_rect, self.indexed_alpha(color, 3, 4));
-                    }
-                }
-                word_start = None;
-                after_dot = false;
-            }
-        }
-    }
+    //                     let highlight_rect = Rect {
+    //                         left: rect.left + start_char_pos as CoordType,
+    //                         top: y,
+    //                         right: rect.left + end_char_pos as CoordType,
+    //                         bottom: y + 1,
+    //                     };
+    //                     self.framebuffer.blend_fg(highlight_rect, self.indexed_alpha(color, 3, 4));
+    //                 }
+    //             }
+    //             word_start = None;
+    //             after_dot = false;
+    //         }
+    //     }
+    // }
     
-    /// Helper function to highlight a specific word in a text section
-    fn highlight_word_in_section(&mut self, rect: Rect, y: CoordType, text_start_chars: usize, text_portion: &str, word: &str, color: IndexedColor) {
-        if let Some(pos) = text_portion.find(word) {
-            let start_char_pos = text_start_chars + text_portion[..pos].chars().count();
-            let end_char_pos = start_char_pos + word.chars().count();
+    // /// Helper function to highlight a specific word in a text section
+    // fn highlight_word_in_section(&mut self, rect: Rect, y: CoordType, text_start_chars: usize, text_portion: &str, word: &str, color: IndexedColor) {
+    //     if let Some(pos) = text_portion.find(word) {
+    //         let start_char_pos = text_start_chars + text_portion[..pos].chars().count();
+    //         let end_char_pos = start_char_pos + word.chars().count();
             
-            let highlight_rect = Rect {
-                left: rect.left + start_char_pos as CoordType,
-                top: y,
-                right: rect.left + end_char_pos as CoordType,
-                bottom: y + 1,
-            };
-            self.framebuffer.blend_fg(highlight_rect, self.indexed(color));
-        }
-    }
+    //         let highlight_rect = Rect {
+    //             left: rect.left + start_char_pos as CoordType,
+    //             top: y,
+    //             right: rect.left + end_char_pos as CoordType,
+    //             bottom: y + 1,
+    //         };
+    //         self.framebuffer.blend_fg(highlight_rect, self.indexed(color));
+    //     }
+    // }
     
     /// Helper function to check if a string is a valid identifier
-    fn is_valid_identifier(&self, s: &str) -> bool {
-        if s.is_empty() {
-            return false;
-        }
+    // fn is_valid_identifier(&self, s: &str) -> bool {
+    //     if s.is_empty() {
+    //         return false;
+    //     }
         
-        let mut chars = s.chars();
-        let first = chars.next().unwrap();
+    //     let mut chars = s.chars();
+    //     let first = chars.next().unwrap();
         
-        // Must start with letter or underscore
-        if !first.is_alphabetic() && first != '_' {
-            return false;
-        }
+    //     // Must start with letter or underscore
+    //     if !first.is_alphabetic() && first != '_' {
+    //         return false;
+    //     }
         
-        // Rest must be alphanumeric or underscore
-        chars.all(|c| c.is_alphanumeric() || c == '_')
-    }
-}
+    //     // Rest must be alphanumeric or underscore
+    //     chars.all(|c| c.is_alphanumeric() || c == '_')
+    // }
 
 /// Context is a temporary object that is created for each frame.
 /// Its primary purpose is to build a UI tree.
