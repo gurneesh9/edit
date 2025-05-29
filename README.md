@@ -10,6 +10,10 @@ This editor pays homage to the classic [MS-DOS Editor](https://en.wikipedia.org/
 
 ![Screenshot of Python syntax highlight](./assets/syntax-highligh-python.png)
 
+## Works on Mac too. (Running with Ghostty as terminal Emulator)
+
+![Screenshot of macos Python syntax highlight](./assets/macos-syntax-highlight-python.png)
+
 ## Installation
 
 * Download the latest release from our [releases page](https://github.com/microsoft/edit/releases/latest)
