@@ -31,7 +31,7 @@ pub fn draw_editor(ctx: &mut Context, state: &mut State) {
             ctx.label("file_type", &format!("File type: {:?} (Syntax highlighting enabled)", doc.file_type));
             
             // Apply a subtle background color based on file type to show it's working
-            ctx.textarea("editor", doc.buffer.clone());
+            ctx.textarea_with_file_type("editor", doc.buffer.clone(), doc.file_type);
             
             // Apply file-type specific styling to show syntax highlighting is active
             match doc.file_type {
@@ -53,7 +53,7 @@ pub fn draw_editor(ctx: &mut Context, state: &mut State) {
             }
         } else {
             // Use regular textarea for plain text or when syntax highlighting is not available
-            ctx.textarea("editor", doc.buffer.clone());
+            ctx.textarea_with_file_type("editor", doc.buffer.clone(), doc.file_type);
         }
         ctx.attr_intrinsic_size(Size { width: size.width, height: size.height - height_reduction });
         ctx.inherit_focus();

@@ -972,8 +972,8 @@ impl Tui {
                 if !tc.single_line {
                     // Detect file type - you might want to pass this as a parameter
                     // or store it in the TextareaContent for better accuracy
-                    let file_type = FileType::Python; // Default, or detect based on context
-                    self.apply_syntax_highlighting(destination, file_type);
+                    // let file_type = FileType::Python; // Default, or detect based on context
+                    self.apply_syntax_highlighting(destination, tc.file_type);
                 }                
 
                 if !tc.single_line {
@@ -2580,15 +2580,19 @@ impl<'a> Context<'a, '_> {
         classname: &'static str,
         text: &'b mut dyn WriteableDocument,
     ) -> bool {
-        self.textarea_internal(classname, TextBufferPayload::Editline(text))
+        self.textarea_internal(classname, TextBufferPayload::Editline(text), None)
+    }
+
+    pub fn textarea_with_file_type(&mut self, classname: &'static str, tb: RcTextBuffer, file_type: FileType) {
+        self.textarea_internal(classname, TextBufferPayload::Textarea(tb), Some(file_type));
     }
 
     /// Creates a text area.
     pub fn textarea(&mut self, classname: &'static str, tb: RcTextBuffer) {
-        self.textarea_internal(classname, TextBufferPayload::Textarea(tb));
+        self.textarea_internal(classname, TextBufferPayload::Textarea(tb), None);
     }
 
-    fn textarea_internal(&mut self, classname: &'static str, payload: TextBufferPayload) -> bool {
+    fn textarea_internal(&mut self, classname: &'static str, payload: TextBufferPayload, file_type: Option<FileType>) -> bool {
         self.block_begin(classname);
         self.block_end();
 
@@ -2639,6 +2643,7 @@ impl<'a> Context<'a, '_> {
             preferred_column: 0,
             single_line,
             has_focus: self.tui.is_node_focused(node.id),
+            file_type: file_type.unwrap_or(FileType::Plain),
         });
 
         let content = match node.content {
@@ -4174,6 +4179,7 @@ struct TextareaContent<'a> {
 
     single_line: bool,
     has_focus: bool,
+    file_type: FileType,
 }
 
 /// NOTE: Must not contain items that require drop().
