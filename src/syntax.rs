@@ -15,6 +15,7 @@ pub enum FileType {
     TypeScript,
     HTML,
     CSS,
+    Dockerfile
     // Add more as needed
 }
 
@@ -43,6 +44,10 @@ impl SyntaxHighlighter {
     }
 
     pub fn detect_file_type(filename: &str) -> FileType {
+        if filename == "Dockerfile" {
+            return FileType::Dockerfile;
+        }
+
         match Path::new(filename)
             .extension()
             .and_then(OsStr::to_str)
@@ -75,6 +80,7 @@ impl SyntaxHighlighter {
             FileType::TypeScript => self.syntax_set.find_syntax_by_extension("ts").unwrap_or_else(|| self.syntax_set.find_syntax_plain_text()),
             FileType::HTML => self.syntax_set.find_syntax_by_extension("html").unwrap_or_else(|| self.syntax_set.find_syntax_plain_text()),
             FileType::CSS => self.syntax_set.find_syntax_by_extension("css").unwrap_or_else(|| self.syntax_set.find_syntax_plain_text()),
+            FileType::Dockerfile => self.syntax_set.find_syntax_by_extension("Dockerfile").unwrap_or_else(|| self.syntax_set.find_syntax_plain_text()),
         };
 
         // Perform highlighting
