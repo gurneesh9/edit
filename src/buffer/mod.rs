@@ -43,6 +43,7 @@ use crate::framebuffer::{Framebuffer, IndexedColor};
 use crate::helpers::*;
 use crate::oklab::oklab_blend;
 use crate::simd::memchr2;
+use crate::syntax::{SmartIndenter, FileType};
 use crate::unicode::{self, Cursor, MeasurementConfig};
 use crate::{apperr, icu};
 
@@ -208,6 +209,11 @@ pub struct TextBuffer {
     overtype: bool,
 
     wants_cursor_visibility: bool,
+    
+    // Smart indentation fields
+    smart_indenter: SmartIndenter,
+    current_file_type: FileType,
+    smart_indent_enabled: bool,
 }
 
 impl TextBuffer {
@@ -255,6 +261,11 @@ impl TextBuffer {
             overtype: false,
 
             wants_cursor_visibility: false,
+            
+            // Initialize smart indentation
+            smart_indenter: SmartIndenter::new(),
+            current_file_type: FileType::Plain,
+            smart_indent_enabled: true,
         })
     }
 
@@ -509,6 +520,26 @@ impl TextBuffer {
         self.indent_with_tabs = indent_with_tabs;
     }
 
+    /// Returns whether smart indentation is enabled.
+    pub fn smart_indent_enabled(&self) -> bool {
+        self.smart_indent_enabled
+    }
+
+    /// Sets whether smart indentation is enabled.
+    pub fn set_smart_indent_enabled(&mut self, enabled: bool) {
+        self.smart_indent_enabled = enabled;
+    }
+
+    /// Returns the current file type for smart indentation.
+    pub fn current_file_type(&self) -> FileType {
+        self.current_file_type
+    }
+
+    /// Sets the file type for smart indentation.
+    pub fn set_file_type(&mut self, file_type: FileType) {
+        self.current_file_type = file_type;
+    }
+
     /// Sets whether the line the cursor is on should be highlighted.
     pub fn set_line_highlight_enabled(&mut self, enabled: bool) {
         self.line_highlight_enabled = enabled;
@@ -589,6 +620,33 @@ impl TextBuffer {
 
     /// Reads a file from disk into the text buffer, detecting encoding and BOM.
     pub fn read_file(
+        &mut self,
+        file: &mut File,
+        encoding: Option<&'static str>,
+    ) -> apperr::Result<()> {
+        // Implementation moved here later - for now just call the main implementation
+        self.read_file_internal(file, encoding)
+    }
+
+    /// Reads a file from a path, automatically detecting file type for smart indentation.
+    pub fn read_file_with_path(
+        &mut self,
+        file: &mut File,
+        file_path: &std::path::Path,
+        encoding: Option<&'static str>,
+    ) -> apperr::Result<()> {
+        // Detect file type from path
+        if let Some(filename) = file_path.file_name().and_then(|n| n.to_str()) {
+            let file_type = crate::syntax::SyntaxHighlighter::detect_file_type(filename);
+            self.set_file_type(file_type);
+        }
+        
+        // Delegate to the existing read_file method
+        self.read_file(file, encoding)
+    }
+
+    /// Internal implementation of file reading
+    fn read_file_internal(
         &mut self,
         file: &mut File,
         encoding: Option<&'static str>,
@@ -1850,44 +1908,14 @@ impl TextBuffer {
             newline_buffer.push_str(if self.newlines_are_crlf { "\r\n" } else { "\n" });
 
             if !raw {
-                // We'll give the next line the same indentation as the previous one.
-                // This block figures out how much that is. We can't reuse that value,
-                // because "  a\n  a\n" should give the 3rd line a total indentation of 4.
-                // Assuming your terminal has bracketed paste, this won't be a concern though.
-                // (If it doesn't, use a different terminal.)
-                let tab_size = self.tab_size as usize;
-                let line_beg = self.goto_line_start(self.cursor, self.cursor.logical_pos.y);
-                let limit = self.cursor.offset;
-                let mut off = line_beg.offset;
-                let mut newline_indentation = 0usize;
-
-                'outer: while off < limit {
-                    let chunk = self.read_forward(off);
-                    let chunk = &chunk[..chunk.len().min(limit - off)];
-
-                    for &c in chunk {
-                        if c == b' ' {
-                            newline_indentation += 1;
-                        } else if c == b'\t' {
-                            newline_indentation += tab_size - (newline_indentation % tab_size);
-                        } else {
-                            break 'outer;
-                        }
-                    }
-
-                    off += chunk.len();
+                if self.smart_indent_enabled && self.should_use_smart_indent() {
+                    let newline_indentation = self.calculate_smart_indent_for_newline();
+                    self.apply_indentation_to_newline_buffer(&mut newline_buffer, newline_indentation);
+                } else {
+                    // Fall back to current simple indentation copying
+                    let newline_indentation = self.calculate_simple_indent_for_newline();
+                    self.apply_indentation_to_newline_buffer(&mut newline_buffer, newline_indentation);
                 }
-
-                // If tabs are enabled, add as many tabs as we can.
-                if self.indent_with_tabs {
-                    let tab_count = newline_indentation / tab_size;
-                    newline_buffer.push_repeat('\t', tab_count);
-                    newline_indentation -= tab_count * tab_size;
-                }
-
-                // If tabs are disabled, or if the indentation wasn't a multiple of the tab size,
-                // add spaces to make up the difference.
-                newline_buffer.push_repeat(' ', newline_indentation);
             }
 
             self.edit_write(newline_buffer.as_bytes());
@@ -2408,6 +2436,144 @@ impl TextBuffer {
     /// For interfacing with ICU.
     pub fn read_forward(&self, off: usize) -> &[u8] {
         self.buffer.read_forward(off)
+    }
+
+    // Smart indentation helper methods
+    
+    fn should_use_smart_indent(&self) -> bool {
+        // Enable smart indent for supported languages
+        matches!(
+            self.current_file_type,
+            FileType::Python | FileType::Rust | FileType::JavaScript | FileType::TypeScript | FileType::HTML | FileType::CSS
+        )
+    }
+    
+    fn calculate_smart_indent_for_newline(&self) -> usize {
+        // Get the current line (the line we just finished typing)
+        let current_line_start = self.goto_line_start(self.cursor, self.cursor.logical_pos.y);
+        let current_line = self.get_line_content(current_line_start);
+        
+        // Debug: Only proceed if we're actually at the end of a line that might need smart indentation
+        let trimmed_line = current_line.trim();
+        
+        // Get the previous lines for context (only lines BEFORE the current one)
+        let mut lines = Vec::new();
+        let current_y = self.cursor.logical_pos.y;
+        
+        // Get up to 3 previous lines for context
+        for y in (0..current_y).rev().take(3).rev() {
+            let line_start = self.goto_line_start(self.cursor, y);
+            let line_content = self.get_line_content(line_start);
+            lines.push(line_content);
+        }
+        
+        // Add the current line (the one we just finished)
+        lines.push(current_line.clone());
+        
+        // Calculate indent for the NEW line we're about to create
+        let base_indent = self.smart_indenter.calculate_indent(
+            &lines,
+            lines.len(), // We want to calculate indent for the line AFTER the current one
+            "", // The new line is empty initially
+            self.current_file_type,
+            self.tab_size as usize,
+        );
+        
+        // Debug: If the current line doesn't end with a colon, brace, etc., just copy the indent
+        if !trimmed_line.ends_with(':') && !trimmed_line.ends_with('{') && !trimmed_line.ends_with('}') && !trimmed_line.starts_with("def ") && !trimmed_line.starts_with("class ") && !trimmed_line.starts_with("if ") && !trimmed_line.starts_with("else") && !trimmed_line.starts_with("elif ") && !trimmed_line.starts_with("for ") && !trimmed_line.starts_with("while ") && !trimmed_line.starts_with("try") && !trimmed_line.starts_with("except") && !trimmed_line.starts_with("finally") {
+            // Just copy the current line's indentation
+            return self.smart_indenter.get_line_indent(&current_line, self.tab_size as usize);
+        }
+        
+        base_indent
+    }
+    
+    fn calculate_simple_indent_for_newline(&self) -> usize {
+        // This is the existing indentation logic (copy previous line's indent)
+        let tab_size = self.tab_size as usize;
+        let line_beg = self.goto_line_start(self.cursor, self.cursor.logical_pos.y);
+        let limit = self.cursor.offset;
+        let mut off = line_beg.offset;
+        let mut newline_indentation = 0usize;
+        
+        'outer: while off < limit {
+            let chunk = self.read_forward(off);
+            let chunk = &chunk[..chunk.len().min(limit - off)];
+            
+            for &c in chunk {
+                if c == b' ' {
+                    newline_indentation += 1;
+                } else if c == b'\t' {
+                    newline_indentation += tab_size - (newline_indentation % tab_size);
+                } else {
+                    break 'outer;
+                }
+            }
+            
+            off += chunk.len();
+        }
+        
+        newline_indentation
+    }
+    
+    fn apply_indentation_to_newline_buffer(&self, newline_buffer: &mut ArenaString, newline_indentation: usize) {
+        if self.indent_with_tabs {
+            let tab_size = self.tab_size as usize;
+            let tab_count = newline_indentation / tab_size;
+            for _ in 0..tab_count {
+                newline_buffer.push('\t');
+            }
+            let remaining_spaces = newline_indentation % tab_size;
+            for _ in 0..remaining_spaces {
+                newline_buffer.push(' ');
+            }
+        } else {
+            for _ in 0..newline_indentation {
+                newline_buffer.push(' ');
+            }
+        }
+    }
+    
+    // Helper functions for smart indentation
+    fn get_line_content(&self, line_start: Cursor) -> String {
+        let mut content = String::new();
+        let mut offset = line_start.offset;
+        
+        loop {
+            let chunk = self.read_forward(offset);
+            if chunk.is_empty() {
+                break;
+            }
+            
+            for &byte in chunk {
+                if byte == b'\n' || byte == b'\r' {
+                    break;
+                }
+                content.push(byte as char);
+                offset += 1;
+            }
+            
+            if chunk.iter().any(|&b| b == b'\n' || b == b'\r') {
+                break;
+            }
+        }
+        
+        content
+    }
+    
+    fn get_lines_around_cursor(&self, context_lines: usize) -> Vec<String> {
+        let current_y = self.cursor.logical_pos.y as usize;
+        let start_y = current_y.saturating_sub(context_lines);
+        let end_y = (current_y + context_lines + 1).min(self.stats.logical_lines as usize);
+        
+        let mut lines = Vec::new();
+        for y in start_y..end_y {
+            let line_start = self.goto_line_start(self.cursor, y as CoordType);
+            let line_content = self.get_line_content(line_start);
+            lines.push(line_content);
+        }
+        
+        lines
     }
 }
 

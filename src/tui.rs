@@ -157,7 +157,6 @@ use crate::document::WriteableDocument;
 use crate::framebuffer::{Attributes, Framebuffer, INDEXED_COLORS_COUNT, IndexedColor};
 use crate::hash::*;
 use crate::helpers::*;
-use crate::input::vk::F;
 use crate::input::{InputKeyMod, kbmod, vk};
 use crate::syntax::{SyntaxHighlighter, FileType};
 use crate::{apperr, arena_format, input, unicode};

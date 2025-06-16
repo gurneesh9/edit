@@ -52,7 +52,7 @@ impl Document {
 
         {
             let mut tb = self.buffer.borrow_mut();
-            tb.read_file(&mut file, encoding)?;
+            tb.read_file_with_path(&mut file, path, encoding)?;
         }
 
         if let Ok(id) = sys::file_id(None, path) {
@@ -75,6 +75,12 @@ impl Document {
                 .and_then(|n| n.to_str())
                 .unwrap_or("")
         );
+        
+        // Set the file type in the buffer for smart indentation
+        {
+            let mut buffer = self.buffer.borrow_mut();
+            buffer.set_file_type(self.file_type);
+        }
         
         // Only create syntax highlighter for supported file types
         if self.file_type != FileType::Plain {
@@ -185,7 +191,7 @@ impl DocumentManager {
         {
             if let Some(file) = &mut file {
                 let mut tb = buffer.borrow_mut();
-                tb.read_file(file, None)?;
+                tb.read_file_with_path(file, &path, None)?;
 
                 if let Some(goto) = goto
                     && goto != Default::default()

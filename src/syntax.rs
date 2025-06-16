@@ -5,8 +5,9 @@ use std::ffi::OsStr;
 use syntect::parsing::SyntaxSet;
 use syntect::highlighting::{ThemeSet, Style};
 use syntect::easy::HighlightLines;
+use regex::Regex;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FileType {
     Plain,
     Python,
@@ -152,3 +153,190 @@ impl SyntaxHighlighter {
             .collect()
     }
 } 
+
+/// Smart indentation rule for a language
+#[derive(Debug)]
+pub struct IndentRule {
+    /// Patterns that increase indent on next line (e.g., ":" in Python, "{" in Rust)
+    pub increase_patterns: Vec<Regex>,
+    /// Patterns that decrease current line indent (e.g., "else", "}" )
+    pub decrease_patterns: Vec<Regex>,
+    /// Patterns that both decrease current line and increase next line
+    pub decrease_increase_patterns: Vec<Regex>,
+}
+
+impl IndentRule {
+    pub fn python() -> Self {
+        Self {
+            increase_patterns: vec![
+                Regex::new(r":\s*(?:#.*)?$").unwrap(),           // def, if, for, while, class, etc.
+                Regex::new(r"^\s*@\w+").unwrap(),                // decorators
+            ],
+            decrease_patterns: vec![
+                Regex::new(r"^\s*(elif|else|except|finally|break|continue|pass|return)\b").unwrap(),
+            ],
+            decrease_increase_patterns: vec![
+                Regex::new(r"^\s*(elif|else|except|finally).*:\s*(?:#.*)?$").unwrap(),
+            ],
+        }
+    }
+    
+    pub fn rust() -> Self {
+        Self {
+            increase_patterns: vec![
+                Regex::new(r"\{\s*(?://.*)?$").unwrap(),         // opening brace
+                Regex::new(r"=>\s*(?://.*)?$").unwrap(),         // match arms without braces
+            ],
+            decrease_patterns: vec![
+                Regex::new(r"^\s*\}").unwrap(),                 // closing brace
+            ],
+            decrease_increase_patterns: vec![
+                Regex::new(r"^\s*\}\s*else\s*\{").unwrap(),     // } else {
+            ],
+        }
+    }
+    
+    pub fn javascript() -> Self {
+        Self {
+            increase_patterns: vec![
+                Regex::new(r"\{\s*(?://.*)?$").unwrap(),         // opening brace
+                Regex::new(r"=>\s*(?://.*)?$").unwrap(),         // arrow functions
+            ],
+            decrease_patterns: vec![
+                Regex::new(r"^\s*\}").unwrap(),                 // closing brace
+            ],
+            decrease_increase_patterns: vec![
+                Regex::new(r"^\s*\}\s*else\s*\{").unwrap(),     // } else {
+                Regex::new(r"^\s*\}\s*catch\s*\(").unwrap(),    // } catch (
+                Regex::new(r"^\s*\}\s*finally\s*\{").unwrap(),  // } finally {
+            ],
+        }
+    }
+    
+    pub fn html() -> Self {
+        Self {
+            increase_patterns: vec![
+                // Opening tags (simplified pattern without lookahead)
+                Regex::new(r"<[a-zA-Z][^/>]*>$").unwrap(),     // Basic opening tags
+                Regex::new(r"<(div|p|ul|ol|li|table|tr|td|th|head|body|html|section|article|nav|aside|header|footer|main)[^>]*>").unwrap(), // Common block elements
+            ],
+            decrease_patterns: vec![
+                Regex::new(r"^\s*</").unwrap(),                 // closing tags
+            ],
+            decrease_increase_patterns: vec![],
+        }
+    }
+
+    pub fn css() -> Self {
+        Self {
+            increase_patterns: vec![
+                Regex::new(r"\{\s*(?:/\*.*\*/\s*)?$").unwrap(), // opening brace
+            ],
+            decrease_patterns: vec![
+                Regex::new(r"^\s*\}").unwrap(),                 // closing brace
+            ],
+            decrease_increase_patterns: vec![],
+        }
+    }
+}
+
+/// Smart indentation engine
+pub struct SmartIndenter {
+    rules: HashMap<FileType, IndentRule>,
+}
+
+impl SmartIndenter {
+    pub fn new() -> Self {
+        let mut rules = HashMap::new();
+        rules.insert(FileType::Python, IndentRule::python());
+        rules.insert(FileType::Rust, IndentRule::rust());
+        rules.insert(FileType::JavaScript, IndentRule::javascript());
+        rules.insert(FileType::TypeScript, IndentRule::javascript()); // Same as JS
+        rules.insert(FileType::HTML, IndentRule::html());
+        rules.insert(FileType::CSS, IndentRule::css());
+        
+        Self { rules }
+    }
+    
+    /// Calculate the indent for a new line based on the previous lines
+    pub fn calculate_indent(
+        &self,
+        lines: &[String],
+        current_line_idx: usize,
+        current_line_content: &str,
+        file_type: FileType,
+        tab_size: usize,
+    ) -> usize {
+        let rule = match self.rules.get(&file_type) {
+            Some(rule) => rule,
+            None => return self.get_previous_indent(lines, current_line_idx, tab_size), // fallback
+        };
+        
+        if lines.is_empty() {
+            return 0;
+        }
+        
+        // If we're calculating for a new line beyond the current lines,
+        // use the last line as the "previous" line
+        let prev_line_idx = if current_line_idx >= lines.len() {
+            lines.len() - 1
+        } else if current_line_idx == 0 {
+            return 0;
+        } else {
+            current_line_idx - 1
+        };
+        
+        let prev_line = &lines[prev_line_idx];
+        let prev_indent = self.get_line_indent(prev_line, tab_size);
+        
+        // Check if current line should decrease indent
+        if rule.decrease_patterns.iter().any(|pattern| pattern.is_match(current_line_content)) {
+            return prev_indent.saturating_sub(tab_size);
+        }
+        
+        // Check if current line should both decrease and increase
+        if rule.decrease_increase_patterns.iter().any(|pattern| pattern.is_match(current_line_content)) {
+            return prev_indent; // Same as previous
+        }
+        
+        // Special case for Python: if __name__ == '__main__' at top level should stay at top level
+        if file_type == FileType::Python && prev_indent == 0 && prev_line.trim().contains("__name__") && prev_line.trim().contains("__main__") {
+            return 0; // Don't indent after main guard at top level
+        }
+        
+        // Check if previous line should increase indent
+        if rule.increase_patterns.iter().any(|pattern| pattern.is_match(prev_line)) {
+            return prev_indent + tab_size;
+        }
+        
+        prev_indent
+    }
+    
+    pub fn get_line_indent(&self, line: &str, tab_size: usize) -> usize {
+        let mut count = 0;
+        for ch in line.chars() {
+            match ch {
+                ' ' => count += 1,
+                '\t' => count += tab_size,
+                _ => break,
+            }
+        }
+        count
+    }
+    
+    fn get_previous_indent(&self, lines: &[String], current_line_idx: usize, tab_size: usize) -> usize {
+        if current_line_idx == 0 {
+            return 0;
+        }
+        
+        let prev_line = &lines[current_line_idx - 1];
+        self.get_line_indent(prev_line, tab_size)
+    }
+}
+
+// Extend the existing SyntaxHighlighter with smart indentation
+impl SyntaxHighlighter {
+    pub fn create_smart_indenter() -> SmartIndenter {
+        SmartIndenter::new()
+    }
+}
