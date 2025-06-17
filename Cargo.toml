@@ -7,6 +7,10 @@ repository = "https://github.com/microsoft/edit"
 homepage = "https://github.com/microsoft/edit"
 license = "MIT"
 
+[[bin]]
+name = "debug_syntaxes"
+path = "src/bin/debug_syntaxes.rs"
+
 [[bench]]
 name = "lib"
 harness = false
@@ -32,7 +36,7 @@ codegen-units = 16          # Make compiling criterion faster (16 is the default
 lto = "thin"                # Similarly, speed up linking by a ton
 
 [dependencies]
-syntect = "5.0"
+syntect = { version = "5.0", default-features = true }
 regex = "1.0"
 
 [target.'cfg(unix)'.dependencies]

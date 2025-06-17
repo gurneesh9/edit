@@ -25,36 +25,9 @@ pub fn draw_editor(ctx: &mut Context, state: &mut State) {
     };
 
     if let Some(doc) = state.documents.active_mut() {
-        // Try to use syntax highlighting for supported file types
-        if doc.file_type != edit::syntax::FileType::Plain && doc.syntax_highlighter.is_some() {
-            // Show file type indicator
-            ctx.label("file_type", &format!("File type: {:?} (Syntax highlighting enabled)", doc.file_type));
-            
-            // Apply a subtle background color based on file type to show it's working
-            ctx.textarea_with_file_type("editor", doc.buffer.clone(), doc.file_type);
-            
-            // Apply file-type specific styling to show syntax highlighting is active
-            match doc.file_type {
-                edit::syntax::FileType::Python => {
-                    ctx.attr_background_rgba(ctx.indexed_alpha(IndexedColor::Blue, 1, 10));
-                }
-                edit::syntax::FileType::Rust => {
-                    ctx.attr_background_rgba(ctx.indexed_alpha(IndexedColor::Red, 1, 10));
-                }
-                edit::syntax::FileType::JavaScript => {
-                    ctx.attr_background_rgba(ctx.indexed_alpha(IndexedColor::Yellow, 1, 10));
-                }
-                edit::syntax::FileType::TypeScript => {
-                    ctx.attr_background_rgba(ctx.indexed_alpha(IndexedColor::Cyan, 1, 10));
-                }
-                _ => {
-                    ctx.attr_background_rgba(ctx.indexed_alpha(IndexedColor::Green, 1, 10));
-                }
-            }
-        } else {
-            // Use regular textarea for plain text or when syntax highlighting is not available
-            ctx.textarea_with_file_type("editor", doc.buffer.clone(), doc.file_type);
-        }
+        // Use consistent background for all file types
+        ctx.textarea_with_file_type("editor", doc.buffer.clone(), doc.file_type);
+        // Set the proper size for the editor area
         ctx.attr_intrinsic_size(Size { width: size.width, height: size.height - height_reduction });
         ctx.inherit_focus();
     } else {

@@ -65,7 +65,7 @@ impl Document {
     fn set_path(&mut self, path: PathBuf) {
         let filename = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
         let dir = path.parent().map(ToOwned::to_owned).unwrap_or_default();
-        self.filename = filename;
+        self.filename = filename.clone();
         self.dir = Some(DisplayablePathBuf::from_path(dir));
         self.path = Some(path.clone());
         
@@ -82,12 +82,8 @@ impl Document {
             buffer.set_file_type(self.file_type);
         }
         
-        // Only create syntax highlighter for supported file types
-        if self.file_type != FileType::Plain {
-            self.syntax_highlighter = Some(SyntaxHighlighter::new());
-        } else {
-            self.syntax_highlighter = None;
-        }
+        // Create syntax highlighter for all file types (not just non-Plain)
+        self.syntax_highlighter = Some(SyntaxHighlighter::new());
         
         self.update_file_mode();
     }

@@ -3,7 +3,7 @@ use std::path::Path;
 use std::ops::Range;
 use std::ffi::OsStr;
 use syntect::parsing::SyntaxSet;
-use syntect::highlighting::{ThemeSet, Style};
+use syntect::highlighting::{ThemeSet, Style, Color};
 use syntect::easy::HighlightLines;
 use regex::Regex;
 
@@ -16,7 +16,8 @@ pub enum FileType {
     TypeScript,
     HTML,
     CSS,
-    Dockerfile
+    Dockerfile,
+    YAML,
     // Add more as needed
 }
 
@@ -36,20 +37,48 @@ impl SyntaxHighlighter {
     const MAX_CACHE_SIZE: usize = 1000;
 
     pub fn new() -> Self {
+        let syntax_set = SyntaxSet::load_defaults_newlines();
+        
         Self {
-            syntax_set: SyntaxSet::load_defaults_newlines(),
+            syntax_set,
             theme_set: ThemeSet::load_defaults(),
             current_theme: "base16-ocean.dark".to_string(),
             highlight_cache: HashMap::new(),
         }
     }
+    
+    /// Ensure YAML support is available by adding a basic YAML syntax if needed
+    fn ensure_yaml_support(syntax_set: &mut SyntaxSet) {
+        // Check if YAML is already available
+        if syntax_set.find_syntax_by_extension("yaml").is_some() ||
+           syntax_set.find_syntax_by_extension("yml").is_some() {
+            return; // YAML already supported
+        }
+        
+        // If not available, we'll create a basic syntax definition
+        // For now, we'll rely on fallbacks in the highlight_line method
+    }
 
     pub fn detect_file_type(filename: &str) -> FileType {
+        // Special case files
         if filename == "Dockerfile" {
             return FileType::Dockerfile;
         }
+        
+        // Check for common YAML files without extensions
+        match filename.to_lowercase().as_str() {
+            ".travis.yml" | ".github/workflows" | "docker-compose.yml" | "docker-compose.yaml" |
+            ".gitlab-ci.yml" | "appveyor.yml" | "circle.yml" | "wercker.yml" |
+            "ansible.yml" | "playbook.yml" | "site.yml" => return FileType::YAML,
+            _ => {}
+        }
+        
+        // Check for files that start with common YAML prefixes
+        if filename.starts_with(".github/") && (filename.ends_with(".yml") || filename.ends_with(".yaml")) {
+            return FileType::YAML;
+        }
 
-        match Path::new(filename)
+        let detected_type = match Path::new(filename)
             .extension()
             .and_then(OsStr::to_str)
         {
@@ -57,10 +86,15 @@ impl SyntaxHighlighter {
             Some("rs") => FileType::Rust,
             Some("js") => FileType::JavaScript,
             Some("ts") => FileType::TypeScript,
+            Some("tsx") => FileType::TypeScript, // Add support for .tsx files
             Some("html") | Some("htm") => FileType::HTML,
             Some("css") => FileType::CSS,
+            // Enhanced YAML detection
+            Some("yaml") | Some("yml") => FileType::YAML,
             _ => FileType::Plain,
-        }
+        };
+        
+        detected_type
     }
 
     pub fn highlight_line<'a>(
@@ -69,6 +103,13 @@ impl SyntaxHighlighter {
         file_type: FileType,
         line_number: usize
     ) -> Vec<(Style, &'a str)> {
+        // For YAML files, if syntect doesn't have YAML support, use custom highlighting
+        if file_type == FileType::YAML {
+            if let Some(custom_highlight) = self.custom_yaml_highlight(line) {
+                return custom_highlight;
+            }
+        }
+        
         // Create cache key
         let cache_key = (line.to_string(), line_number);
         
@@ -78,10 +119,28 @@ impl SyntaxHighlighter {
             FileType::Python => self.syntax_set.find_syntax_by_extension("py").unwrap_or_else(|| self.syntax_set.find_syntax_plain_text()),
             FileType::Rust => self.syntax_set.find_syntax_by_extension("rs").unwrap_or_else(|| self.syntax_set.find_syntax_plain_text()),
             FileType::JavaScript => self.syntax_set.find_syntax_by_extension("js").unwrap_or_else(|| self.syntax_set.find_syntax_plain_text()),
-            FileType::TypeScript => self.syntax_set.find_syntax_by_extension("ts").unwrap_or_else(|| self.syntax_set.find_syntax_plain_text()),
+            FileType::TypeScript => {
+                self.syntax_set.find_syntax_by_extension("ts")
+                    .or_else(|| self.syntax_set.find_syntax_by_name("TypeScript"))
+                    .or_else(|| self.syntax_set.find_syntax_by_name("TypeScript (JavaScript)"))
+                    .or_else(|| self.syntax_set.find_syntax_by_extension("js"))
+                    .unwrap_or_else(|| self.syntax_set.find_syntax_plain_text())
+            },
             FileType::HTML => self.syntax_set.find_syntax_by_extension("html").unwrap_or_else(|| self.syntax_set.find_syntax_plain_text()),
             FileType::CSS => self.syntax_set.find_syntax_by_extension("css").unwrap_or_else(|| self.syntax_set.find_syntax_plain_text()),
             FileType::Dockerfile => self.syntax_set.find_syntax_by_extension("Dockerfile").unwrap_or_else(|| self.syntax_set.find_syntax_plain_text()),
+            FileType::YAML => {
+                // First try to find actual YAML syntax
+                self.syntax_set.find_syntax_by_extension("yaml")
+                    .or_else(|| self.syntax_set.find_syntax_by_extension("yml"))
+                    .or_else(|| self.syntax_set.find_syntax_by_name("YAML"))
+                    .or_else(|| self.syntax_set.find_syntax_by_name("Yaml"))
+                    .or_else(|| self.syntax_set.find_syntax_by_name("yaml"))
+                    // If no YAML syntax, use JSON as it's similar structure
+                    .or_else(|| self.syntax_set.find_syntax_by_extension("json"))
+                    .or_else(|| self.syntax_set.find_syntax_by_name("JSON"))
+                    .unwrap_or_else(|| self.syntax_set.find_syntax_plain_text())
+            },
         };
 
         // Perform highlighting
@@ -151,6 +210,120 @@ impl SyntaxHighlighter {
         self.theme_set.themes.keys()
             .map(|k| k.to_string())
             .collect()
+    }
+
+    /// Debug function to list all available syntax definitions
+    pub fn list_available_syntaxes(&self) -> Vec<String> {
+        self.syntax_set.syntaxes().iter()
+            .map(|syntax| format!("{} ({})", syntax.name, syntax.file_extensions.join(", ")))
+            .collect()
+    }
+
+    /// Check if a specific syntax is available by name or extension
+    pub fn has_syntax_for_extension(&self, extension: &str) -> bool {
+        self.syntax_set.find_syntax_by_extension(extension).is_some()
+    }
+    
+    /// Debug method to check what syntax is being used for a file type
+    pub fn debug_syntax_for_filetype(&self, file_type: FileType) -> String {
+        let syntax = match file_type {
+            FileType::Plain => self.syntax_set.find_syntax_plain_text(),
+            FileType::Python => self.syntax_set.find_syntax_by_extension("py").unwrap_or_else(|| self.syntax_set.find_syntax_plain_text()),
+            FileType::Rust => self.syntax_set.find_syntax_by_extension("rs").unwrap_or_else(|| self.syntax_set.find_syntax_plain_text()),
+            FileType::JavaScript => self.syntax_set.find_syntax_by_extension("js").unwrap_or_else(|| self.syntax_set.find_syntax_plain_text()),
+            FileType::TypeScript => {
+                self.syntax_set.find_syntax_by_extension("ts")
+                    .or_else(|| self.syntax_set.find_syntax_by_name("TypeScript"))
+                    .or_else(|| self.syntax_set.find_syntax_by_name("TypeScript (JavaScript)"))
+                    .or_else(|| self.syntax_set.find_syntax_by_extension("js"))
+                    .unwrap_or_else(|| self.syntax_set.find_syntax_plain_text())
+            },
+            FileType::HTML => self.syntax_set.find_syntax_by_extension("html").unwrap_or_else(|| self.syntax_set.find_syntax_plain_text()),
+            FileType::CSS => self.syntax_set.find_syntax_by_extension("css").unwrap_or_else(|| self.syntax_set.find_syntax_plain_text()),
+            FileType::Dockerfile => self.syntax_set.find_syntax_by_extension("Dockerfile").unwrap_or_else(|| self.syntax_set.find_syntax_plain_text()),
+            FileType::YAML => {
+                self.syntax_set.find_syntax_by_extension("yaml")
+                    .or_else(|| self.syntax_set.find_syntax_by_extension("yml"))
+                    .or_else(|| self.syntax_set.find_syntax_by_name("YAML"))
+                    .or_else(|| self.syntax_set.find_syntax_by_name("Yaml"))
+                    .or_else(|| self.syntax_set.find_syntax_by_name("yaml"))
+                    .or_else(|| self.syntax_set.find_syntax_by_name("YML"))
+                    .or_else(|| self.syntax_set.find_syntax_by_name("Yet Another Markup Language"))
+                    .or_else(|| self.syntax_set.find_syntax_by_extension("json").or_else(|| self.syntax_set.find_syntax_by_name("JSON")))
+                    .unwrap_or_else(|| self.syntax_set.find_syntax_plain_text())
+            },
+        };
+        
+        format!("FileType: {:?} -> Syntax: {}", file_type, syntax.name)
+    }
+    
+    /// Custom YAML highlighting when syntect doesn't have YAML support
+    fn custom_yaml_highlight<'a>(&self, line: &'a str) -> Option<Vec<(Style, &'a str)>> {
+        // Check if native YAML highlighting is available
+        if self.syntax_set.find_syntax_by_extension("yaml").is_some() ||
+           self.syntax_set.find_syntax_by_extension("yml").is_some() {
+            return None; // Use native highlighting
+        }
+        
+        let mut result = Vec::new();
+        
+        // Create different styles for different YAML elements
+        let comment_style = Style {
+            foreground: Color { r: 128, g: 128, b: 128, a: 255 }, // Gray for comments
+            ..Style::default()
+        };
+        
+        let key_style = Style {
+            foreground: Color { r: 100, g: 149, b: 237, a: 255 }, // Blue for keys
+            ..Style::default()
+        };
+        
+        let string_style = Style {
+            foreground: Color { r: 152, g: 195, b: 121, a: 255 }, // Green for strings
+            ..Style::default()
+        };
+        
+        let number_style = Style {
+            foreground: Color { r: 209, g: 154, b: 102, a: 255 }, // Orange for numbers
+            ..Style::default()
+        };
+        
+        let special_style = Style {
+            foreground: Color { r: 198, g: 120, b: 221, a: 255 }, // Purple for special values
+            ..Style::default()
+        };
+        
+        // Simple YAML highlighting
+        if line.trim_start().starts_with('#') {
+            // Comment line
+            result.push((comment_style, line));
+        } else if line.contains(':') && !line.trim_start().starts_with('-') {
+            // Key-value pair
+            if let Some(colon_pos) = line.find(':') {
+                result.push((key_style, &line[..colon_pos + 1]));
+                if colon_pos + 1 < line.len() {
+                    result.push((Style::default(), &line[colon_pos + 1..]));
+                }
+            } else {
+                result.push((Style::default(), line));
+            }
+        } else if line.trim_start().starts_with('-') {
+            // List item
+            if let Some(dash_pos) = line.find('-') {
+                result.push((Style::default(), &line[..dash_pos]));
+                result.push((special_style, "-"));
+                if dash_pos + 1 < line.len() {
+                    result.push((Style::default(), &line[dash_pos + 1..]));
+                }
+            } else {
+                result.push((Style::default(), line));
+            }
+        } else {
+            // Regular text
+            result.push((Style::default(), line));
+        }
+        
+        Some(result)
     }
 } 
 
@@ -238,6 +411,22 @@ impl IndentRule {
             decrease_increase_patterns: vec![],
         }
     }
+
+    pub fn yaml() -> Self {
+        Self {
+            increase_patterns: vec![
+                Regex::new(r":\s*$").unwrap(),                   // key: (ending with colon)
+                Regex::new(r":\s*\|").unwrap(),                  // literal block scalar |
+                Regex::new(r":\s*>").unwrap(),                   // folded block scalar >
+                Regex::new(r"^\s*-\s*$").unwrap(),               // list item with no content
+                Regex::new(r"^\s*-\s+\w+:\s*$").unwrap(),        // list item with key:
+            ],
+            decrease_patterns: vec![
+                // YAML doesn't typically have decrease patterns like braces
+            ],
+            decrease_increase_patterns: vec![],
+        }
+    }
 }
 
 /// Smart indentation engine
@@ -254,6 +443,7 @@ impl SmartIndenter {
         rules.insert(FileType::TypeScript, IndentRule::javascript()); // Same as JS
         rules.insert(FileType::HTML, IndentRule::html());
         rules.insert(FileType::CSS, IndentRule::css());
+        rules.insert(FileType::YAML, IndentRule::yaml()); // Add YAML support
         
         Self { rules }
     }
