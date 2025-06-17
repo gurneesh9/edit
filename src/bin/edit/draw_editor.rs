@@ -13,15 +13,38 @@ use crate::localization::*;
 use crate::state::*;
 
 pub fn draw_editor(ctx: &mut Context, state: &mut State) {
+    // Handle tab-related keyboard shortcuts
+    if ctx.contains_focus() {
+        // Ctrl+T: New tab
+        if ctx.consume_shortcut(kbmod::CTRL | vk::T) {
+            if let Ok(_) = state.documents.add_untitled() {
+                ctx.needs_rerender();
+            }
+        }
+        // Ctrl+W: Close current tab
+        else if ctx.consume_shortcut(kbmod::CTRL | vk::W) {
+            if state.documents.len() > 1 {
+                state.wants_close = true;
+                ctx.needs_rerender();
+            } else {
+                // If it's the last tab, just create a new untitled one
+                state.wants_close = true;
+                if let Ok(_) = state.documents.add_untitled() {
+                    ctx.needs_rerender();
+                }
+            }
+        }
+    }
+
     if !matches!(state.wants_search.kind, StateSearchKind::Hidden | StateSearchKind::Disabled) {
         draw_search(ctx, state);
     }
 
     let size = ctx.size();
     let height_reduction = match state.wants_search.kind {
-        StateSearchKind::Search => 4,
-        StateSearchKind::Replace => 5,
-        _ => 2,
+        StateSearchKind::Search => 5,    // +1 for tab bar
+        StateSearchKind::Replace => 6,   // +1 for tab bar
+        _ => 3,                         // +1 for tab bar (2 original + 1 for tabs)
     };
 
     if let Some(doc) = state.documents.active_mut() {

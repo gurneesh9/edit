@@ -82,8 +82,11 @@ impl Document {
             buffer.set_file_type(self.file_type);
         }
         
-        // Create syntax highlighter for all file types (not just non-Plain)
-        self.syntax_highlighter = Some(SyntaxHighlighter::new());
+        // Create syntax highlighter for all file types
+        let mut highlighter = SyntaxHighlighter::new();
+        // Try to set Studio Ghibli theme
+        highlighter.set_ghibli_theme();
+        self.syntax_highlighter = Some(highlighter);
         
         self.update_file_mode();
     }
@@ -131,6 +134,74 @@ impl DocumentManager {
 
     pub fn remove_active(&mut self) {
         self.list.pop_front();
+    }
+
+    /// Get all documents as a vector (for tab display)
+    pub fn all_documents(&self) -> Vec<&Document> {
+        self.list.iter().collect()
+    }
+
+    /// Get the index of the currently active document
+    pub fn active_index(&self) -> Option<usize> {
+        if self.list.is_empty() {
+            None
+        } else {
+            Some(0) // Active document is always at the front
+        }
+    }
+
+    /// Switch to document at the given index
+    pub fn switch_to_index(&mut self, index: usize) -> bool {
+        if index >= self.list.len() {
+            return false;
+        }
+
+        if index == 0 {
+            return true; // Already at the front
+        }
+
+        // Move the document at `index` to the front
+        let mut cursor = self.list.cursor_front_mut();
+        for _ in 0..index {
+            cursor.move_next();
+        }
+
+        if let Some(doc_list) = cursor.remove_current_as_list() {
+            self.list.cursor_front_mut().splice_before(doc_list);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Switch to the next document (cycle forward)
+    pub fn switch_to_next(&mut self) -> bool {
+        if self.list.len() <= 1 {
+            return false;
+        }
+
+        // Move the front document to the back
+        if let Some(doc) = self.list.pop_front() {
+            self.list.push_back(doc);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Switch to the previous document (cycle backward)
+    pub fn switch_to_previous(&mut self) -> bool {
+        if self.list.len() <= 1 {
+            return false;
+        }
+
+        // Move the back document to the front
+        if let Some(doc) = self.list.pop_back() {
+            self.list.push_front(doc);
+            true
+        } else {
+            false
+        }
     }
 
     pub fn add_untitled(&mut self) -> apperr::Result<&mut Document> {

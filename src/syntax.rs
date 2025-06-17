@@ -38,25 +38,43 @@ impl SyntaxHighlighter {
 
     pub fn new() -> Self {
         let syntax_set = SyntaxSet::load_defaults_newlines();
+        let theme_set = ThemeSet::load_defaults();
         
         Self {
             syntax_set,
-            theme_set: ThemeSet::load_defaults(),
-            current_theme: "base16-ocean.dark".to_string(),
+            theme_set,
+            current_theme: "base16-mocha.dark".to_string(), // Use a warmer default theme
             highlight_cache: HashMap::new(),
         }
     }
     
-    /// Ensure YAML support is available by adding a basic YAML syntax if needed
-    fn ensure_yaml_support(syntax_set: &mut SyntaxSet) {
-        // Check if YAML is already available
-        if syntax_set.find_syntax_by_extension("yaml").is_some() ||
-           syntax_set.find_syntax_by_extension("yml").is_some() {
-            return; // YAML already supported
+    /// Set a Studio Ghibli inspired theme
+    pub fn set_ghibli_theme(&mut self) -> bool {
+        // Try some warm, natural themes that might be available
+        let ghibli_themes = vec![
+            "base16-mocha.dark",      // Warm browns and earth tones
+            "base16-eighties.dark",   // Retro warm colors
+            "base16-tomorrow.dark",   // Clean with warm undertones
+            "base16-atelier-forest.dark", // Forest themed
+            "base16-atelier-heath.dark",  // Natural heath colors
+            "Monokai",               // Classic with good contrast
+            "Solarized (dark)",      // Natural, easy on eyes
+        ];
+        
+        for theme_name in ghibli_themes {
+            if self.set_theme(theme_name) {
+                println!("🌳 Applied Studio Ghibli theme: {}", theme_name);
+                return true;
+            }
         }
         
-        // If not available, we'll create a basic syntax definition
-        // For now, we'll rely on fallbacks in the highlight_line method
+        // If none of the preferred themes work, just list what's available
+        println!("Available themes:");
+        for theme in self.available_themes() {
+            println!("  - {}", theme);
+        }
+        
+        false
     }
 
     pub fn detect_file_type(filename: &str) -> FileType {
@@ -267,29 +285,29 @@ impl SyntaxHighlighter {
         
         let mut result = Vec::new();
         
-        // Create different styles for different YAML elements
+        // Studio Ghibli inspired colors - warm, natural, magical
         let comment_style = Style {
-            foreground: Color { r: 128, g: 128, b: 128, a: 255 }, // Gray for comments
+            foreground: Color { r: 156, g: 142, b: 124, a: 255 }, // Warm gray (like aged paper)
             ..Style::default()
         };
         
         let key_style = Style {
-            foreground: Color { r: 100, g: 149, b: 237, a: 255 }, // Blue for keys
+            foreground: Color { r: 76, g: 119, b: 79, a: 255 }, // Forest green (Totoro's color)
             ..Style::default()
         };
         
-        let string_style = Style {
-            foreground: Color { r: 152, g: 195, b: 121, a: 255 }, // Green for strings
+        let _string_style = Style {
+            foreground: Color { r: 217, g: 166, b: 87, a: 255 }, // Golden yellow (like wheat fields)
             ..Style::default()
         };
         
-        let number_style = Style {
-            foreground: Color { r: 209, g: 154, b: 102, a: 255 }, // Orange for numbers
+        let _number_style = Style {
+            foreground: Color { r: 204, g: 102, b: 102, a: 255 }, // Soft coral (like Howl's castle)
             ..Style::default()
         };
         
         let special_style = Style {
-            foreground: Color { r: 198, g: 120, b: 221, a: 255 }, // Purple for special values
+            foreground: Color { r: 147, g: 112, b: 179, a: 255 }, // Soft lavender (magical elements)
             ..Style::default()
         };
         

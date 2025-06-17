@@ -14,6 +14,7 @@ mod draw_editor;
 mod draw_filepicker;
 mod draw_menubar;
 mod draw_statusbar;
+mod draw_tabs;
 mod localization;
 mod state;
 
@@ -27,6 +28,7 @@ use draw_editor::*;
 use draw_filepicker::*;
 use draw_menubar::*;
 use draw_statusbar::*;
+use draw_tabs::*;
 use edit::arena::{self, Arena, ArenaString, scratch_arena};
 use edit::framebuffer::{self, IndexedColor};
 use edit::helpers::{KIBI, MEBI, MetricFormatter, Rect, Size};
@@ -296,6 +298,7 @@ fn print_version() {
 
 fn draw(ctx: &mut Context, state: &mut State) {
     draw_menubar(ctx, state);
+    draw_ghibli_tab_bar(ctx, state); // Add our magical Ghibli-themed tab bar
     draw_editor(ctx, state);
     draw_statusbar(ctx, state);
 
