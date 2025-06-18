@@ -6,6 +6,7 @@ use edit::helpers::*;
 use edit::input::vk;
 use edit::tui::*;
 use edit::{arena_format, icu};
+use edit::syntax::FileType;
 
 use crate::localization::*;
 use crate::state::*;
@@ -20,6 +21,11 @@ pub fn draw_statusbar(ctx: &mut Context, state: &mut State) {
     ctx.attr_padding(Rect::two(0, 1));
 
     if let Some(doc) = state.documents.active() {
+        // Get values before borrowing the buffer mutably
+        let file_type = doc.file_type;
+        let filename = doc.filename.clone();
+        let has_path = doc.path.is_some();
+        
         let mut tb = doc.buffer.borrow_mut();
 
         ctx.table_next_row();
@@ -36,7 +42,7 @@ pub fn draw_statusbar(ctx: &mut Context, state: &mut State) {
         state.wants_encoding_picker |=
             ctx.button("encoding", tb.encoding(), ButtonStyle::default());
         if state.wants_encoding_picker {
-            if doc.path.is_some() {
+            if has_path {
                 ctx.block_begin("frame");
                 ctx.attr_float(FloatSpec {
                     anchor: Anchor::Last,
@@ -174,15 +180,20 @@ pub fn draw_statusbar(ctx: &mut Context, state: &mut State) {
         ctx.attr_intrinsic_size(Size { width: COORD_TYPE_SAFE_MAX, height: 1 });
         {
             let total = state.documents.len();
-            let mut filename = doc.filename.as_str();
+            let file_icon = get_file_type_icon(file_type);
+            let mut display_filename = filename.as_str();
             let filename_buf;
 
             if total > 1 {
-                filename_buf = arena_format!(ctx.arena(), "{} + {}", filename, total - 1);
-                filename = &filename_buf;
+                filename_buf = arena_format!(ctx.arena(), "{} {} + {}", file_icon, display_filename, total - 1);
+                display_filename = &filename_buf;
+            } else {
+                // For single files, show icon + filename
+                filename_buf = arena_format!(ctx.arena(), "{} {}", file_icon, display_filename);
+                display_filename = &filename_buf;
             }
 
-            state.wants_document_picker |= ctx.button("filename", filename, ButtonStyle::default());
+            state.wants_document_picker |= ctx.button("filename", display_filename, ButtonStyle::default());
             ctx.inherit_focus();
             ctx.attr_overflow(Overflow::TruncateMiddle);
             ctx.attr_position(Position::Right);
@@ -289,5 +300,19 @@ pub fn draw_document_picker(ctx: &mut Context, state: &mut State) {
     }
     if ctx.modal_end() {
         state.wants_document_picker = false;
+    }
+}
+
+/// Get file type icon emoji for display
+fn get_file_type_icon(file_type: FileType) -> &'static str {
+    match file_type {
+        FileType::Rust => "🦀",
+        FileType::JavaScript => "⚡",
+        FileType::TypeScript => "💙", 
+        FileType::Python => "🐍",
+        FileType::HTML => "🌐",
+        FileType::CSS => "🎨",
+        FileType::YAML => "⚙️",
+        _ => "📄",
     }
 }
