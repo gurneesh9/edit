@@ -15,6 +15,7 @@ mod draw_filepicker;
 mod draw_menubar;
 mod draw_statusbar;
 mod draw_tabs;
+mod file_icons;
 mod localization;
 mod state;
 
@@ -29,6 +30,8 @@ use draw_filepicker::*;
 use draw_menubar::*;
 use draw_statusbar::*;
 use draw_tabs::*;
+use file_icons::*;
+use file_icons::*;
 use edit::arena::{self, Arena, ArenaString, scratch_arena};
 use edit::framebuffer::{self, IndexedColor};
 use edit::helpers::{KIBI, MEBI, MetricFormatter, Rect, Size};
@@ -176,10 +179,12 @@ fn run() -> apperr::Result<()> {
             let mut output = tui.render(&scratch);
 
             {
-                let filename = state.documents.active().map_or("", |d| &d.filename);
-                if filename != state.osc_title_filename {
-                    write_terminal_title(&mut output, filename);
-                    state.osc_title_filename = filename.to_string();
+                if let Some(doc) = state.documents.active() {
+                    let filename_with_icon = get_file_display_name_with_icon(&doc.filename, doc.file_type);
+                    if filename_with_icon != state.osc_title_filename {
+                        write_terminal_title(&mut output, &filename_with_icon);
+                        state.osc_title_filename = filename_with_icon;
+                    }
                 }
             }
 
@@ -385,11 +390,11 @@ fn draw_handle_wants_exit(_ctx: &mut Context, state: &mut State) {
 }
 
 #[cold]
-fn write_terminal_title(output: &mut ArenaString, filename: &str) {
+fn write_terminal_title(output: &mut ArenaString, filename_with_icon: &str) {
     output.push_str("\x1b]0;");
 
-    if !filename.is_empty() {
-        output.push_str(&sanitize_control_chars(filename));
+    if !filename_with_icon.is_empty() {
+        output.push_str(&sanitize_control_chars(filename_with_icon));
         output.push_str(" - ");
     }
 

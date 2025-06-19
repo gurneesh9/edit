@@ -4,10 +4,10 @@
 use edit::framebuffer::IndexedColor;
 use edit::input::{kbmod, vk};
 use edit::tui::*;
-use edit::syntax::FileType;
 
 use crate::documents::Document;
 use crate::state::*;
+use crate::file_icons::*;
 
 /// Studio Ghibli themed tab bar with magical touches
 pub fn draw_ghibli_tab_bar(ctx: &mut Context, state: &mut State) {
@@ -74,16 +74,7 @@ pub fn draw_ghibli_tab_bar(ctx: &mut Context, state: &mut State) {
         let is_dirty = doc.buffer.borrow().is_dirty();
         
         // Magical tab content with emoji based on file type
-        let file_icon = match doc.file_type {
-            FileType::Rust => "🦀",
-            FileType::JavaScript => "⚡",
-            FileType::TypeScript => "💙", 
-            FileType::Python => "🐍",
-            FileType::HTML => "🌐",
-            FileType::CSS => "🎨",
-            FileType::YAML => "⚙️",
-            _ => "📄",
-        };
+        let file_icon = get_file_icon(doc.file_type);
         
         let display_name = get_display_name(doc);
         let tab_text = if is_dirty {

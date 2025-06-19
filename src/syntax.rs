@@ -63,7 +63,7 @@ impl SyntaxHighlighter {
         
         for theme_name in ghibli_themes {
             if self.set_theme(theme_name) {
-                println!("🌳 Applied Studio Ghibli theme: {}", theme_name);
+                // println!("🌳 Applied Studio Ghibli theme: {}", theme_name);
                 return true;
             }
         }

@@ -9,6 +9,7 @@ use edit::{arena_format, icu};
 
 use crate::localization::*;
 use crate::state::*;
+use crate::file_icons::*;
 
 pub fn draw_statusbar(ctx: &mut Context, state: &mut State) {
     ctx.table_begin("statusbar");
@@ -177,8 +178,19 @@ pub fn draw_statusbar(ctx: &mut Context, state: &mut State) {
             let mut filename = doc.filename.as_str();
             let filename_buf;
 
+            // Add file icon to filename display
+            let file_icon = get_file_icon(doc.file_type);
+            let display_name = if doc.filename.is_empty() {
+                "Untitled".to_string()
+            } else {
+                doc.filename.clone()
+            };
+
             if total > 1 {
-                filename_buf = arena_format!(ctx.arena(), "{} + {}", filename, total - 1);
+                filename_buf = arena_format!(ctx.arena(), "{} {} + {}", file_icon, display_name, total - 1);
+                filename = &filename_buf;
+            } else {
+                filename_buf = arena_format!(ctx.arena(), "{} {}", file_icon, display_name);
                 filename = &filename_buf;
             }
 
@@ -268,8 +280,14 @@ pub fn draw_document_picker(ctx: &mut Context, state: &mut State) {
 
                 ctx.styled_list_item_begin();
                 ctx.attr_overflow(Overflow::TruncateTail);
-                ctx.styled_label_add_text(if tb.is_dirty() { "* " } else { "  " });
-                ctx.styled_label_add_text(&doc.filename);
+                
+                // Add file icon and dirty indicator
+                let file_icon = get_file_icon(doc.file_type);
+                let dirty_indicator = if tb.is_dirty() { "● " } else { "  " };
+                ctx.styled_label_add_text(&format!("{} {}", file_icon, dirty_indicator));
+                
+                let display_name = if doc.filename.is_empty() { "Untitled" } else { &doc.filename };
+                ctx.styled_label_add_text(display_name);
 
                 if let Some(path) = &doc.dir {
                     ctx.styled_label_add_text("   ");
