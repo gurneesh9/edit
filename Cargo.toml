@@ -7,10 +7,6 @@ repository = "https://github.com/microsoft/edit"
 homepage = "https://github.com/microsoft/edit"
 license = "MIT"
 
-[[bin]]
-name = "debug_syntaxes"
-path = "src/bin/debug_syntaxes.rs"
-
 [[bench]]
 name = "lib"
 harness = false
